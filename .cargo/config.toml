@@ -1,0 +1,16 @@
+# Use rsproxy (字节跳动) mirror for crates.io — much faster in China.
+[source.crates-io]
+replace-with = "rsproxy-sparse"
+
+[source.rsproxy-sparse]
+registry = "sparse+https://rsproxy.cn/index/"
+
+[registries.rsproxy]
+index = "sparse+https://rsproxy.cn/index/"
+
+[net]
+git-fetch-with-cli = true
+
+# OneDrive 目录会干扰构建脚本（文件锁/按需占位），target 放到本地目录
+[build]
+target-dir = "C:/Users/22534/.workbuddy/build/ftp-toolbox-target"

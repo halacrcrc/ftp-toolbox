@@ -1,0 +1,24 @@
+[package]
+name = "ftp-toolbox-app"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+description = "FTP/TFTP toolbox desktop app (Tauri shell over ftp-core)"
+
+[lib]
+name = "ftp_toolbox_app_lib"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+tauri = { version = "2", features = [] }
+tauri-plugin-dialog = "2"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tokio = { version = "1", features = ["full"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+get_if_addrs = "0.5"
+ftp-core = { path = "../../crates/ftp-core" }

@@ -10,6 +10,17 @@
 
 一个窗口同时搞定「起服务」和「传文件」：左边开 FTP/TFTP 服务器，右边用内置客户端连上去互传，底部实时进度，后端日志逐条可见——调嵌入式设备、路由器、旧仪器这类只支持 TFTP/FTP 的对端时，不用再东拼西凑一堆小工具。
 
+## 下载
+
+Windows 安装包见 [Releases](https://github.com/halacrcrc/ftp-toolbox/releases/latest)：
+
+- `ftp-toolbox_0.2.0_x64-setup.exe` — NSIS 安装程序，向导式安装（推荐）
+- `ftp-toolbox_0.2.0_x64_en-US.msi` — MSI 安装包，适合批量部署
+
+依赖系统自带 WebView2（Win10/11 通常已预装）。安装包未做代码签名，首次运行 SmartScreen 会提示「未知发布者」，点「仍要运行」即可。
+
+从源码构建见下方[快速开始](#快速开始)。
+
 ## 功能
 
 - **FTP 服务器**：匿名 / 账号密码认证，被动端口 50000-50099，会话级日志（基于 libunftp）

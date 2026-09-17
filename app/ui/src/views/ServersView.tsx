@@ -148,7 +148,7 @@ function ServerCard({
             ))}
           </select>
         </label>
-        <label className="field" style={{ width: 110 }}>
+        <label className="field narrow">
           <span>端口（{portHint}）</span>
           <input
             type="number"

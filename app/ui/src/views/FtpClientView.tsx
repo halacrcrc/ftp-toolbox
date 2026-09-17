@@ -76,11 +76,11 @@ export default function FtpClientView({ log }: { log: Log }) {
             <span>服务器地址</span>
             <input value={addr} onChange={(e) => setAddr(e.target.value)} disabled={connected} />
           </label>
-          <label className="field" style={{ width: 140 }}>
+          <label className="field medium">
             <span>用户名</span>
             <input value={user} onChange={(e) => setUser(e.target.value)} disabled={connected} />
           </label>
-          <label className="field" style={{ width: 140 }}>
+          <label className="field medium">
             <span>密码</span>
             <input
               type="password"

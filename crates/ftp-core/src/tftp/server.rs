@@ -6,29 +6,69 @@ use std::time::Instant;
 use tokio::fs::File;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::UdpSocket;
-use tokio::task::AbortHandle;
+use tokio::sync::{broadcast, watch};
+use tokio::task::JoinHandle;
 use tracing::{error, info, warn};
 
 use super::packet::{negotiated_blksize, Packet};
 use super::{BLOCK_SIZE, MAX_RETRIES, TIMEOUT};
 use crate::error::{Error, Result};
+use crate::lifecycle::{ServerShared, ServerState};
 
-/// Handle to a running TFTP server task. Drop/abort to stop it.
+/// Handle to a running TFTP server.
+///
+/// Same lifecycle contract as the FTP server: dropping the handle or calling
+/// [`TftpServerHandle::stop`] stops the receive loop, and [`Self::is_running`]
+/// reports whether it is still alive. Transfers already in flight are left to
+/// finish (they own their ephemeral socket), but no new request is accepted.
+#[derive(Debug)]
 pub struct TftpServerHandle {
-    abort: AbortHandle,
+    shared: Arc<ServerShared>,
+    stop_tx: Option<broadcast::Sender<()>>,
+    join: JoinHandle<()>,
     pub addr: String,
     pub root: PathBuf,
 }
 
 impl TftpServerHandle {
-    pub fn stop(&self) {
-        self.abort.abort();
+    /// True while the receive loop is alive.
+    pub fn is_running(&self) -> bool {
+        self.shared.is_running()
+    }
+
+    /// Transfers currently in flight.
+    pub fn sessions(&self) -> usize {
+        self.shared.sessions()
+    }
+
+    /// Running flag + session count in one snapshot.
+    pub fn state(&self) -> ServerState {
+        self.shared.state()
+    }
+
+    /// Subscribe to run-state changes (seeded with the current value).
+    pub fn subscribe(&self) -> watch::Receiver<ServerState> {
+        self.shared.subscribe()
+    }
+
+    /// Ask the server to stop without waiting for it.
+    pub fn signal_stop(&mut self) {
+        self.shared.request_stop();
+        if let Some(tx) = self.stop_tx.take() {
+            let _ = tx.send(());
+        }
+    }
+
+    /// Stop the server and wait until the receive loop has finished.
+    pub async fn stop(mut self) {
+        self.signal_stop();
+        let _ = (&mut self.join).await;
     }
 }
 
 impl Drop for TftpServerHandle {
     fn drop(&mut self) {
-        self.abort.abort();
+        self.signal_stop();
     }
 }
 
@@ -47,14 +87,30 @@ pub async fn start_server(root: PathBuf, bind: String) -> Result<TftpServerHandl
     let local = socket.local_addr()?.to_string();
     let root = Arc::new(root);
 
+    let (stop_tx, _) = broadcast::channel::<()>(1);
+    let shared = ServerShared::new("tftp");
+
     let join = tokio::spawn({
         let root = Arc::clone(&root);
         let local = local.clone();
+        let shared = Arc::clone(&shared);
+        let mut stop_rx = stop_tx.subscribe();
         async move {
+            // Clears `running` and notifies subscribers on any exit path.
+            let _loop_guard = shared.loop_guard();
             info!(%local, "tftp server listening");
             let mut buf = vec![0u8; 4096];
             loop {
-                let (n, peer) = match socket.recv_from(&mut buf).await {
+                // select! makes the loop cancellable: dropping the sender (or
+                // sending on it) ends the loop instead of leaking a task.
+                let received = tokio::select! {
+                    _ = stop_rx.recv() => {
+                        info!("tftp server stopped");
+                        break;
+                    }
+                    received = socket.recv_from(&mut buf) => received,
+                };
+                let (n, peer) = match received {
                     Ok(v) => v,
                     Err(e) => {
                         error!("tftp recv error: {e}");
@@ -69,7 +125,9 @@ pub async fn start_server(root: PathBuf, bind: String) -> Result<TftpServerHandl
                     }
                 };
                 let root = Arc::clone(&root);
+                let session = shared.session();
                 tokio::spawn(async move {
+                    let _session = session;
                     if let Err(e) = handle_session(root, peer, first).await {
                         warn!(%peer, "tftp session ended: {e}");
                     }
@@ -79,7 +137,9 @@ pub async fn start_server(root: PathBuf, bind: String) -> Result<TftpServerHandl
     });
 
     Ok(TftpServerHandle {
-        abort: join.abort_handle(),
+        shared,
+        stop_tx: Some(stop_tx),
+        join,
         addr: local,
         root: (*root).clone(),
     })

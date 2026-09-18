@@ -1,6 +1,6 @@
 [package]
 name = "ftp-toolbox-app"
-version = "0.2.1"
+version = "0.2.3"
 edition.workspace = true
 license.workspace = true
 description = "FTP/TFTP toolbox desktop app (Tauri shell over ftp-core)"
@@ -20,5 +20,10 @@ serde_json = "1"
 tokio = { version = "1", features = ["full"] }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+# get_if_addrs 保留给非 Windows 平台（以及 ipconfig 失败时的兜底）：
+# 它在 Windows 上只给 AdapterName（网卡 GUID），拿不到「以太网 / WLAN」这种友好名。
 get_if_addrs = "0.5"
 ftp-core = { path = "../../crates/ftp-core" }
+
+[target.'cfg(windows)'.dependencies]
+ipconfig = "0.3"

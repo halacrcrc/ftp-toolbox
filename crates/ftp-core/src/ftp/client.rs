@@ -86,12 +86,17 @@ impl FtpClient {
         progress: Option<ProgressTx>,
     ) -> Result<()> {
         let name = remote.to_string();
+        // Ask for the size up front so the progress bar can show a real
+        // percentage instead of an indeterminate spinner. Servers without the
+        // SIZE command (or that refuse it for a given file) simply leave it
+        // unknown — not worth failing the transfer over.
+        let total = self.stream.size(remote).await.ok().map(|n| n as u64);
         TransferEvent::emit(
             &progress,
             TransferEvent::Started {
                 kind: TransferKind::Download,
                 file: name.clone(),
-                total: None,
+                total,
             },
         );
 
@@ -112,7 +117,7 @@ impl FtpClient {
                     kind: TransferKind::Download,
                     file: name.clone(),
                     bytes: received,
-                    total: None,
+                    total,
                 },
             );
         }

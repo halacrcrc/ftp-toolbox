@@ -1,5 +1,5 @@
-import { useEffect, useState } from "react";
-import { api, pickFolder, NetInterface } from "../api";
+import { useCallback, useEffect, useRef, useState } from "react";
+import { api, pickFolder, NetInterface, PassivePortCheck, ServerStatus } from "../api";
 import { LogEntry } from "../App";
 
 type Log = (text: string, level?: LogEntry["level"]) => void;
@@ -12,6 +12,8 @@ interface ServerPrefs {
   port: string;
   authMode: "anonymous" | "account";
   user: string;
+  /** 被动数据端口段，界面写法是闭区间："50000-50099" */
+  passive: string;
 }
 
 function loadPrefs(key: string, fallback: ServerPrefs): ServerPrefs {
@@ -22,6 +24,35 @@ function loadPrefs(key: string, fallback: ServerPrefs): ServerPrefs {
     // corrupted storage -> fall back to defaults
   }
   return fallback;
+}
+
+/**
+ * 解析界面里填的被动端口段，返回闭区间 [start, end]。
+ *
+ * 只做形状检查；真正的合法性（起止顺序、是否低于 1024）由后端在启动时判定，
+ * 免得两边各写一套规则慢慢跑偏。
+ */
+function parsePassive(spec: string): [number, number] | null {
+  const text = spec.trim();
+  const closed = /^(\d{1,5})\s*-\s*(\d{1,5})$/.exec(text);
+  if (closed) return [Number(closed[1]), Number(closed[2])];
+  const halfOpen = /^(\d{1,5})\s*\.\.\s*(\d{1,5})$/.exec(text);
+  if (halfOpen) return [Number(halfOpen[1]), Number(halfOpen[2]) - 1];
+  if (/^\d{1,5}$/.test(text)) {
+    const port = Number(text);
+    return [port, port];
+  }
+  return null;
+}
+
+/** Dropdown label: friendly name first — never the internal adapter GUID. */
+function interfaceLabel(it: NetInterface): string {
+  const name = it.name || "未知网卡";
+  const desc = it.desc.length > 36 ? `${it.desc.slice(0, 36)}…` : it.desc;
+  const parts = [`${name}（${it.ip}）`];
+  if (desc) parts.push(desc);
+  if (it.loopback) parts.push("仅本机");
+  return parts.join(" · ");
 }
 
 // ---------- server card ----------
@@ -35,15 +66,31 @@ interface ServerCardProps {
   defaultPort: string;
   portHint: string;
   withAuth?: boolean;
+  /** 是否暴露被动数据端口段（只有 FTP 需要）。 */
+  withPassive?: boolean;
+  defaultPassive?: string;
   interfaces: NetInterface[];
-  onStart: (root: string, addr: string, user?: string, pass?: string) => Promise<string>;
+  /** 网卡列表是否已成功读到过 —— 与「列表是不是空的」是两件事。 */
+  interfacesLoaded: boolean;
+  /** Backend snapshot; `null` while the first status query is in flight. */
+  status: ServerStatus | null;
+  onStart: (
+    root: string,
+    addr: string,
+    user?: string,
+    pass?: string,
+    passivePorts?: string
+  ) => Promise<string>;
   onStop: () => Promise<string>;
+  /** Re-read server state (and interfaces) from the backend. */
+  onRefresh: () => Promise<void>;
   log: Log;
 }
 
 function ServerCard({
   serverKey, title, desc, defaultRoot, defaultPort, portHint,
-  withAuth, interfaces, onStart, onStop, log,
+  withAuth, withPassive, defaultPassive = "",
+  interfaces, interfacesLoaded, status, onStart, onStop, onRefresh, log,
 }: ServerCardProps) {
   const storageKey = `ftp-toolbox:server:${serverKey}`;
   const [prefs, setPrefs] = useState<ServerPrefs>(() =>
@@ -53,11 +100,18 @@ function ServerCard({
       port: defaultPort,
       authMode: "anonymous",
       user: "admin",
+      passive: defaultPassive,
     })
   );
   const [pass, setPass] = useState(""); // password intentionally NOT persisted
-  const [running, setRunning] = useState(false);
   const [busy, setBusy] = useState(false);
+  const [check, setCheck] = useState<PassivePortCheck | null>(null);
+
+  // Run state is owned by the backend, never by this component: switching pages
+  // unmounts the card, which used to reset a local `running` flag and made the
+  // "启动服务" button reappear while the server was still up.
+  const running = status?.running ?? false;
+  const known = status !== null;
 
   // persist every change (except password and runtime state)
   useEffect(() => {
@@ -66,6 +120,86 @@ function ServerCard({
 
   const set = <K extends keyof ServerPrefs>(k: K, v: ServerPrefs[K]) =>
     setPrefs((p) => ({ ...p, [k]: v }));
+
+  // Windows keeps blocks of TCP ports for itself (Hyper-V/WSL2 reserve
+  // 50000-50059 on this machine, right inside the old default range). libunftp
+  // picks a random port from the passive band and retries a few times, so a
+  // partial overlap means PASV fails roughly 1% of the time — invisible until
+  // a colleague reports "列表偶尔失败". Checking up front turns that into a
+  // visible warning with a one-click fix.
+  useEffect(() => {
+    if (!withPassive) return;
+    const parsed = parsePassive(prefs.passive);
+    if (!parsed) {
+      setCheck(null);
+      return;
+    }
+    let cancelled = false;
+    // debounce: the user is probably still typing
+    const timer = setTimeout(() => {
+      api
+        .checkPassivePorts(parsed[0], parsed[1])
+        .then((result) => {
+          if (!cancelled) setCheck(result);
+        })
+        .catch(() => {
+          if (!cancelled) setCheck(null);
+        });
+    }, 250);
+    return () => {
+      cancelled = true;
+      clearTimeout(timer);
+    };
+  }, [withPassive, prefs.passive]);
+
+  // A saved interface IP can disappear (DHCP change, cable unplugged, adapter
+  // disabled). Two things this must *not* do:
+  //
+  //  1. rewrite `prefs.iface` — while the server is running it is still bound
+  //     to that very address, so rewriting would make the UI lie about what is
+  //     being listened on;
+  //  2. persist the rewrite — the user's preference should survive a cable
+  //     being out for a minute, and must not be overwritten by whatever the
+  //     network happens to look like this second.
+  //
+  // So the stale entry stays in the dropdown (marked 已掉线) and we warn, but
+  // the *user* decides when to switch. This also matters more than it used to:
+  // the list is now refetched on a timer, so an auto-rewrite would fire on its
+  // own the moment the cable came out.
+  // Two separate questions that used to be one:
+  //
+  //   1. "Can the <select> show the value we will actually use?" — unconditional.
+  //      If no <option> matches `prefs.iface`, the browser displays the *first*
+  //      option instead, so the UI would read "所有接口 (0.0.0.0)" while
+  //      `start()` still sends `prefs.iface`. Display must never disagree with
+  //      what is used.
+  //   2. "Can we claim it is offline?" — only once we have actually read the
+  //      list; an enumeration failure also yields an empty list, and calling
+  //      that "已掉线" would be a guess.
+  //
+  // So: render the option per (1), but only add the 已掉线 label / warning /
+  // disabled start button per (2).
+  const ifaceUnlisted =
+    prefs.iface !== "0.0.0.0" && !interfaces.some((it) => it.ip === prefs.iface);
+  const ifaceMissing = interfacesLoaded && ifaceUnlisted;
+
+  // Warn on the *edge* only: `interfaces` is refetched every few seconds, and
+  // logging on every poll would bury everything else.
+  const warnedFor = useRef<string | null>(null);
+  useEffect(() => {
+    if (!ifaceMissing) {
+      warnedFor.current = null;
+      return;
+    }
+    if (warnedFor.current === prefs.iface) return;
+    warnedFor.current = prefs.iface;
+    log(
+      running
+        ? `监听接口 ${prefs.iface} 已掉线（拔线或网卡禁用）：服务器仍绑在该地址上，插回网线即可恢复；若要换地址请先停止服务`
+        : `监听接口 ${prefs.iface} 已不在网卡列表中（拔线或 IP 变化），启动前请重新选择`,
+      "error"
+    );
+  }, [ifaceMissing, prefs.iface, running, log]);
 
   const browse = async () => {
     try {
@@ -85,13 +219,15 @@ function ServerCard({
         prefs.root,
         addr,
         useAccount ? prefs.user : undefined,
-        useAccount ? pass : undefined
+        useAccount ? pass : undefined,
+        withPassive ? prefs.passive : undefined
       );
       log(msg, "ok");
-      setRunning(true);
     } catch (e) {
+      // 端口占用、地址失效等都会走到这里（后端在绑定完成前不返回成功）
       log(`${title}启动失败: ${e}`, "error");
     } finally {
+      await onRefresh(); // 无论成败都以后端为准
       setBusy(false);
     }
   };
@@ -100,9 +236,18 @@ function ServerCard({
     setBusy(true);
     try {
       log(await onStop());
-      setRunning(false);
     } catch (e) {
       log(`${title}停止失败: ${e}`, "error");
+    } finally {
+      await onRefresh();
+      setBusy(false);
+    }
+  };
+
+  const refresh = async () => {
+    setBusy(true);
+    try {
+      await onRefresh();
     } finally {
       setBusy(false);
     }
@@ -114,11 +259,28 @@ function ServerCard({
         <div>
           <div className="card-title">{title}</div>
           <div className="card-desc">{desc}</div>
+          {running && status?.localAddr && (
+            <div className="card-desc">
+              已监听 {status.localAddr}
+              {status.sessions > 0 ? ` · ${status.sessions} 个活动连接` : ""}
+            </div>
+          )}
         </div>
-        <span className={`status-chip${running ? " running" : ""}`}>
-          <span className="dot" />
-          {running ? "运行中" : "已停止"}
-        </span>
+        <div className="card-head-right">
+          <span className={`status-chip${running ? " running" : ""}`}>
+            <span className="dot" />
+            {running
+              ? status && status.sessions > 0
+                ? `运行中 · ${status.sessions}`
+                : "运行中"
+              : known
+                ? "已停止"
+                : "读取中…"}
+          </span>
+          <button className="btn small" onClick={refresh} disabled={busy}>
+            刷新
+          </button>
+        </div>
       </div>
 
       <label className="field">
@@ -141,9 +303,19 @@ function ServerCard({
           <span>监听接口</span>
           <select value={prefs.iface} onChange={(e) => set("iface", e.target.value)} disabled={running}>
             <option value="0.0.0.0">所有接口 (0.0.0.0)</option>
+            {/* 选中的地址不在列表里时必须把它补回 <option>，否则 <select> 会渲染成
+                第一个选项（「所有接口」），界面显示的值与 start() 实际使用的值不一致。
+                这一条与「列表是否读取成功」无关，所以要按 ifaceUnlisted 渲染。
+                至于要不要打「已掉线」这个标签，得先确定列表真的读到了 —— 读失败
+                同样是空列表，那时候只能说「不确定」，不能替用户下结论。 */}
+            {ifaceUnlisted && (
+              <option value={prefs.iface}>
+                {ifaceMissing ? `${prefs.iface}（已掉线）` : prefs.iface}
+              </option>
+            )}
             {interfaces.map((it) => (
               <option key={`${it.name}-${it.ip}`} value={it.ip}>
-                {it.name} ({it.ip})
+                {interfaceLabel(it)}
               </option>
             ))}
           </select>
@@ -160,6 +332,80 @@ function ServerCard({
           />
         </label>
       </div>
+
+      {ifaceMissing && (
+        <div className="hint-line warn with-action">
+          <span>
+            ⚠ 监听接口 {prefs.iface} 已掉线（网线拔出或网卡已禁用）。
+            {running
+              ? "服务器仍绑在该地址上，插回网线即可恢复；要换地址请先停止服务。"
+              : "可以先改用「所有接口」，或等网线插回后再启动。"}
+          </span>
+          {!running && (
+            <button className="btn small" onClick={() => set("iface", "0.0.0.0")}>
+              改用所有接口
+            </button>
+          )}
+        </div>
+      )}
+
+      {withPassive && (
+        <>
+          <label className="field">
+            <span>被动数据端口段（PASV/EPSV 用，起止用 - 连接）</span>
+            <div className="input-row">
+              <input
+                className="grow"
+                value={prefs.passive}
+                onChange={(e) => set("passive", e.target.value)}
+                disabled={running}
+                placeholder={defaultPassive}
+              />
+              {check && !check.ok && check.suggested && (
+                <button
+                  className="btn small"
+                  onClick={() => set("passive", check.suggested ?? "")}
+                  disabled={running}
+                >
+                  改用 {check.suggested}
+                </button>
+              )}
+            </div>
+          </label>
+          {check && !check.ok && (
+            <div className="hint-line warn">
+              ⚠ 与系统保留段 {check.conflicts.join("、")} 重叠：落在其中的端口无法用于
+              PASV，列表/传输会间歇性失败（控制连接仍是正常的）
+            </div>
+          )}
+          {/* netsh 里带 * 的「托管排除段」是另一回事：实测它不阻止绑定到具体
+              地址，而 PASV 正是绑具体地址，所以这类重叠通常无害，不值得报警。
+              真冲突和托管重叠同时出现时，措辞要区分开，否则用户会以为有两件事
+              要修 —— 托管那条得读起来像补充说明，而不是第二条告警。
+              这个块踩过两次坑，都跟 JSX 的空白处理有关，改的时候注意：
+              1) 别让两支共用一段中段去拼接 —— 上一版两支共用以「内」结尾的中段，
+                 ok 那支就拼成「…还与…排除段内」，读不通。宁可重复整句。
+              2) `{join()}` 后面的字必须和它**同一行**。JSX 会把跨行的文本折叠成一个
+                 空格，但 HTML 标签后面紧跟的换行（即 JSXText 的首行为空）是被直接
+                 剥掉的，不补空格 —— 分开写就会渲染成「50000-50059重叠」。
+                 同页 warn 行的 `{check.conflicts.join("、")} 重叠：` 是正确写法。 */}
+          {check && check.managedConflicts.length > 0 && (
+            <div className="hint-line note">
+              {check.ok ? (
+                <>
+                  提示：该段还与系统托管排除段 {check.managedConflicts.join("、")} 重叠（Hyper-V / WSL2
+                  常用）。实测这类段仍可绑定，通常不影响 PASV；若列表/传输偶发失败，再换段即可。
+                </>
+              ) : (
+                <>
+                  另外，该段也落在系统托管排除段 {check.managedConflicts.join("、")} 内（Hyper-V / WSL2
+                  常用）。实测这类段仍可绑定，通常不影响 PASV，不必为它单独换段。
+                </>
+              )}
+            </div>
+          )}
+        </>
+      )}
 
       {withAuth && (
         <>
@@ -212,7 +458,14 @@ function ServerCard({
             停止服务
           </button>
         ) : (
-          <button className="btn primary" onClick={start} disabled={busy}>
+          // 选中的接口已掉线时不允许启动：否则用户只会拿到一条
+          // EADDRNOTAVAIL 绑定失败，而这本来是可以提前避免的。
+          <button
+            className="btn primary"
+            onClick={start}
+            disabled={busy || !known || ifaceMissing}
+            title={ifaceMissing ? `监听接口 ${prefs.iface} 已掉线，请先改用其它接口` : undefined}
+          >
             启动服务
           </button>
         )}
@@ -223,30 +476,98 @@ function ServerCard({
 
 // ---------- view ----------
 
-export default function ServersView({ log }: { log: Log }) {
-  const [interfaces, setInterfaces] = useState<NetInterface[]>([]);
+interface ServersViewProps {
+  log: Log;
+  ftpStatus: ServerStatus | null;
+  tftpStatus: ServerStatus | null;
+  refresh: () => Promise<void>;
+}
 
+/**
+ * 网卡列表的轮询周期。
+ *
+ * 枚举一次实测 p50≈4ms、尖峰 30-80ms，3s 一次的成本可以忽略；换来的是拔网线
+ * 后最多 3s 下拉就更新 —— 对配置类控件而言足够「实时」，而且不依赖任何平台
+ * 专有通知机制（Windows 的 NotifyIpInterfaceChange 只覆盖一个平台）。
+ * 窗口不可见时不轮询；页面切走时组件卸载，effect 清理会直接停掉定时器。
+ */
+const INTERFACE_POLL_MS = 3000;
+
+export default function ServersView({ log, ftpStatus, tftpStatus, refresh }: ServersViewProps) {
+  const [interfaces, setInterfaces] = useState<NetInterface[]>([]);
+  // 「列表是否已经成功读到过」与「列表是不是空的」是两件事：枚举失败时
+  // `interfaces` 会是空数组，但那时说用户选的接口「已掉线」是错的。所以只有
+  // 成功读回来才敢下判断；一直没读到就维持原始的空下拉状态。
+  const [interfacesLoaded, setInterfacesLoaded] = useState(false);
+  // 只在列表真的变了才 setState：否则每次轮询都会重渲染（下拉会闪），
+  // 依赖 interfaces 的 effect 也会被无谓地重新触发。
+  // 后端已按 IP 稳定排序、字段顺序也固定，所以这份快照可以逐字比较。
+  const lastSnapshot = useRef("");
+  const pollFailed = useRef(false);
+
+  const loadInterfaces = useCallback(async () => {
+    try {
+      const next = await api.listInterfaces();
+      pollFailed.current = false;
+      setInterfacesLoaded(true);
+      const snapshot = JSON.stringify(next);
+      if (snapshot !== lastSnapshot.current) {
+        lastSnapshot.current = snapshot;
+        setInterfaces(next);
+      }
+    } catch (e) {
+      // 轮询失败只报一次，别把日志刷屏
+      if (!pollFailed.current) {
+        pollFailed.current = true;
+        log(`读取网卡列表失败: ${e}`, "error");
+      }
+    }
+  }, [log]);
+
+  // 网卡列表要跟着网线插拔走：挂载时拉一次，之后定时轮询，并在窗口重新获得
+  // 焦点 / 重新可见时立刻补拉，不必等下一个周期。
   useEffect(() => {
-    api
-      .listInterfaces()
-      .then(setInterfaces)
-      .catch((e) => log(`读取网卡列表失败: ${e}`, "error"));
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
+    void loadInterfaces();
+    const timer = setInterval(() => {
+      if (document.visibilityState === "hidden") return;
+      void loadInterfaces();
+    }, INTERFACE_POLL_MS);
+    const onWake = () => {
+      if (document.visibilityState === "visible") void loadInterfaces();
+    };
+    window.addEventListener("focus", onWake);
+    document.addEventListener("visibilitychange", onWake);
+    return () => {
+      clearInterval(timer);
+      window.removeEventListener("focus", onWake);
+      document.removeEventListener("visibilitychange", onWake);
+    };
+  }, [loadInterfaces]);
+
+  // 刷新按钮同时更新运行态和网卡列表（网卡 IP 会随网络环境变化）
+  const refreshAll = async () => {
+    await Promise.all([refresh(), loadInterfaces()]);
+  };
 
   return (
     <div className="grid-2">
       <ServerCard
         serverKey="ftp"
         title="FTP 服务器"
-        desc="支持匿名或账号密码认证，被动端口 50000-50099"
+        desc="支持匿名或账号密码认证"
         defaultRoot="C:\\ftp-root"
         defaultPort="21"
         portHint="默认 21"
         withAuth
+        withPassive
+        // 与 ftp-core 的 DEFAULT_PASSIVE_PORTS (50000..50100) 保持一致
+        defaultPassive="50000-50099"
         interfaces={interfaces}
+        interfacesLoaded={interfacesLoaded}
+        status={ftpStatus}
         onStart={api.startFtpServer}
         onStop={api.stopFtpServer}
+        onRefresh={refreshAll}
         log={log}
       />
       <ServerCard
@@ -257,8 +578,11 @@ export default function ServersView({ log }: { log: Log }) {
         defaultPort="69"
         portHint="默认 69"
         interfaces={interfaces}
+        interfacesLoaded={interfacesLoaded}
+        status={tftpStatus}
         onStart={(root, addr) => api.startTftpServer(root, addr)}
         onStop={api.stopTftpServer}
+        onRefresh={refreshAll}
         log={log}
       />
     </div>

@@ -14,8 +14,8 @@
 
 Windows 安装包见 [Releases](https://github.com/halacrcrc/ftp-toolbox/releases/latest)：
 
-- `ftp-toolbox_0.2.0_x64-setup.exe` — NSIS 安装程序，向导式安装（推荐）
-- `ftp-toolbox_0.2.0_x64_en-US.msi` — MSI 安装包，适合批量部署
+- `ftp-toolbox_0.2.3_x64-setup.exe` — NSIS 安装程序，向导式安装（推荐）
+- `ftp-toolbox_0.2.3_x64_en-US.msi` — MSI 安装包，适合批量部署
 
 依赖系统自带 WebView2（Win10/11 通常已预装）。安装包未做代码签名，首次运行 SmartScreen 会提示「未知发布者」，点「仍要运行」即可。
 
@@ -63,8 +63,10 @@ cargo run -p ftp-toolbox-app
 
 ```bash
 cd app               # 必须在这个目录（tauri CLI 只在 cwd 往下找配置）
-../ui/node_modules/.bin/tauri build
+ui/node_modules/.bin/tauri build
 ```
+
+> ⚠ 请用上面这个项目内的 CLI。`cargo tauri build` 走的是 `cargo install` 装的全局 `cargo-tauri`，它可能是 **1.x**，会拿 v1 的 schema 去校验这份 `tauri.conf.json`（v2 格式）并报一堆 `Additional property 'app' is not allowed`。
 
 产物在 target 的 `release/bundle/{nsis,msi}/`（NSIS 出 `setup.exe`，WiX 出 `.msi`）。
 

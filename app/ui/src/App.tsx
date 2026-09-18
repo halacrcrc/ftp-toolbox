@@ -1,5 +1,12 @@
 import { useCallback, useEffect, useState } from "react";
-import { fmtBytes, onBackendLog, onTransferProgress } from "./api";
+import {
+  api,
+  fmtBytes,
+  onBackendLog,
+  onServerState,
+  onTransferProgress,
+  ServerStatus,
+} from "./api";
 import Sidebar, { ViewKey } from "./components/Sidebar";
 import ProgressBar from "./components/ProgressBar";
 import ServersView from "./views/ServersView";
@@ -31,6 +38,11 @@ export default function App() {
   const [view, setView] = useState<ViewKey>("servers");
   const [logs, setLogs] = useState<LogEntry[]>([]);
   const [progress, setProgress] = useState<Progress | null>(null);
+  // Server run state lives here (App never unmounts) and is always re-read from
+  // the backend when the servers page is opened — the pages themselves are
+  // mounted/unmounted on navigation, so component-local state would be lost.
+  const [ftpStatus, setFtpStatus] = useState<ServerStatus | null>(null);
+  const [tftpStatus, setTftpStatus] = useState<ServerStatus | null>(null);
 
   const log = useCallback((text: string, level: LogEntry["level"] = "info") => {
     // keep at most 500 entries so the log view never grows unbounded
@@ -38,6 +50,35 @@ export default function App() {
       ...ls.slice(-499),
       { time: new Date().toLocaleTimeString(), level, text },
     ]);
+  }, []);
+
+  /** Ask the backend what is actually running (single source of truth). */
+  const refreshServers = useCallback(async () => {
+    const [ftp, tftp] = await Promise.allSettled([
+      api.ftpServerStatus(),
+      api.tftpServerStatus(),
+    ]);
+    if (ftp.status === "fulfilled") setFtpStatus(ftp.value);
+    else log(`读取 FTP 服务器状态失败: ${ftp.reason}`, "error");
+    if (tftp.status === "fulfilled") setTftpStatus(tftp.value);
+    else log(`读取 TFTP 服务器状态失败: ${tftp.reason}`, "error");
+  }, [log]);
+
+  useEffect(() => {
+    if (view === "servers") void refreshServers();
+  }, [view, refreshServers]);
+
+  // Run state is *pushed* by the backend, so it stays correct without a manual
+  // refresh: a server that dies on its own, or clients connecting and
+  // disconnecting, show up as they happen.
+  useEffect(() => {
+    const unlisten = [
+      onServerState("ftp", setFtpStatus),
+      onServerState("tftp", setTftpStatus),
+    ];
+    return () => {
+      unlisten.forEach((p) => p.then((f) => f()));
+    };
   }, []);
 
   // Single global subscription: the backend pushes TransferEvents for all
@@ -95,7 +136,14 @@ export default function App() {
           <h1>{TITLES[view]}</h1>
         </header>
         <main className="content">
-          {view === "servers" && <ServersView log={log} />}
+          {view === "servers" && (
+            <ServersView
+              log={log}
+              ftpStatus={ftpStatus}
+              tftpStatus={tftpStatus}
+              refresh={refreshServers}
+            />
+          )}
           {view === "ftp" && <FtpClientView log={log} />}
           {view === "tftp" && <TftpClientView log={log} />}
           {view === "logs" && <LogView logs={logs} onClear={() => setLogs([])} />}

@@ -176,6 +176,14 @@ button {
   flex: 0 0 auto;
 }
 
+/* 右侧状态区：状态标签 + 刷新按钮，整体不参与压缩 */
+.card-head-right {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex: 0 0 auto;
+}
+
 .card-title {
   font-size: 15px;
   font-weight: 600;
@@ -185,6 +193,32 @@ button {
   font-size: 12.5px;
   color: var(--text-2);
   margin-top: 3px;
+}
+
+/* 字段下方的说明行：负上边距让它在视觉上归属上面那个字段 */
+.hint-line {
+  font-size: 12.5px;
+  line-height: 1.5;
+  color: var(--text-2);
+  margin: -6px 0 12px;
+}
+
+.hint-line.warn {
+  color: #b45309;
+}
+
+/* 中性提示（例如「该段被系统托管排除，通常仍可用」）：不是告警，别用警示色，
+   否则真告警就被稀释了 */
+.hint-line.note {
+  color: var(--text-2);
+}
+
+/* 提示行里带按钮时让它整齐换行，而不是把按钮挤出容器 */
+.hint-line.with-action {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 4px 10px;
 }
 
 /* ---------- form ---------- */

@@ -31,7 +31,7 @@ async fn loopback_upload_download_with_blksize() {
     let downloaded = tokio::fs::read(&local_down).await.unwrap();
     assert_eq!(downloaded, data, "downloaded content mismatch");
 
-    server.stop();
+    server.stop().await;
     let _ = tokio::fs::remove_dir_all(&root).await;
     let _ = tokio::fs::remove_file(&local_up).await;
     let _ = tokio::fs::remove_file(&local_down).await;

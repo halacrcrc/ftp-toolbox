@@ -259,7 +259,10 @@ button {
   color: var(--text-2);
 }
 
-.field input:not([type="radio"]) {
+/* 文本输入类控件的通用样式。注意必须同时排除 radio 和 checkbox：
+   后者若被匹配会拿到 width:100% + 内边距 + 边框，被撑成一行“假输入框”
+   （v0.2.5 的 FTPS 开关就是这样被拉坏的）。 */
+.field input:not([type="radio"], [type="checkbox"]) {
   width: 100%;
   min-width: 0;
   border: 1px solid var(--border);
@@ -271,13 +274,13 @@ button {
   transition: border-color 0.12s, box-shadow 0.12s;
 }
 
-.field input:not([type="radio"]):focus {
+.field input:not([type="radio"], [type="checkbox"]):focus {
   border-color: var(--accent);
   box-shadow: 0 0 0 3px rgba(37, 99, 235, 0.12);
   background: #fff;
 }
 
-.field input:not([type="radio"]):disabled {
+.field input:not([type="radio"], [type="checkbox"]):disabled {
   color: var(--text-3);
   background: #f3f4f6;
 }

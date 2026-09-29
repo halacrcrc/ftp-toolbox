@@ -1,6 +1,6 @@
 [package]
 name = "ftp-core"
-version = "0.2.6"
+version = "0.3.0"
 edition.workspace = true
 license.workspace = true
 description = "Pure-tokio FTP/TFTP server & client engine, GUI-agnostic"
@@ -23,3 +23,15 @@ rcgen = { version = "0.13", default-features = false, features = ["pem", "aws_lc
 sha2 = "0.10"
 base64 = "0.22"
 time = "0.3"
+# russh 0.63 强制要求 ring 或 aws-lc-rs 二选一作为加密后端（源码 compile_error!），
+# 不存在纯 Rust 选项。本 workspace 经 rcgen（aws_lc_rs feature）已在编译 aws-lc-rs
+# 1.17.1，即当前环境 C 工具链可用；ring 在本沙箱历史上编译失败（docs/sftp-design.md Q1）。
+# 故：关默认 feature（去掉 rsa/flate2），显式启用 aws-lc-rs —— 复用既有后端，不引入新 C 依赖。
+russh = { version = "0.63", default-features = false, features = ["aws-lc-rs"] }
+russh-sftp = "3.0"
+# ed25519 主机密钥生成（russh 自身依赖同版本 rand 0.10）
+rand = { version = "0.10", features = ["thread_rng"] }
+
+[dev-dependencies]
+# 序列化契约回归测试用（IPC 结构体的 camelCase 字段名）。
+serde_json = "1"

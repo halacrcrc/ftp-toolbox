@@ -6,12 +6,16 @@ import {
   onServerState,
   onTransferProgress,
   ServerStatus,
+  SftpServerStatus,
+  TransferKind,
+  transferLabel,
 } from "./api";
 import Sidebar, { ViewKey } from "./components/Sidebar";
 import ProgressBar from "./components/ProgressBar";
 import ServersView from "./views/ServersView";
 import FtpClientView from "./views/FtpClientView";
 import TftpClientView from "./views/TftpClientView";
+import SftpClientView from "./views/SftpClientView";
 import LogView from "./views/LogView";
 
 export interface LogEntry {
@@ -23,7 +27,7 @@ export interface LogEntry {
 
 export interface Progress {
   file: string;
-  kind: "upload" | "download";
+  kind: TransferKind;
   bytes: number;
   total: number | null;
 }
@@ -32,6 +36,7 @@ const TITLES: Record<ViewKey, string> = {
   servers: "服务器",
   ftp: "FTP 客户端",
   tftp: "TFTP 客户端",
+  "sftp-client": "SFTP 客户端",
   logs: "运行日志",
 };
 
@@ -48,6 +53,7 @@ export default function App() {
   // mounted/unmounted on navigation, so component-local state would be lost.
   const [ftpStatus, setFtpStatus] = useState<ServerStatus | null>(null);
   const [tftpStatus, setTftpStatus] = useState<ServerStatus | null>(null);
+  const [sftpStatus, setSftpStatus] = useState<SftpServerStatus | null>(null);
 
   const log = useCallback((text: string, level: LogEntry["level"] = "info") => {
     // keep at most 500 entries so the log view never grows unbounded
@@ -59,14 +65,17 @@ export default function App() {
 
   /** Ask the backend what is actually running (single source of truth). */
   const refreshServers = useCallback(async () => {
-    const [ftp, tftp] = await Promise.allSettled([
+    const [ftp, tftp, sftp] = await Promise.allSettled([
       api.ftpServerStatus(),
       api.tftpServerStatus(),
+      api.sftpServerStatus(),
     ]);
     if (ftp.status === "fulfilled") setFtpStatus(ftp.value);
     else log(`读取 FTP 服务器状态失败: ${ftp.reason}`, "error");
     if (tftp.status === "fulfilled") setTftpStatus(tftp.value);
     else log(`读取 TFTP 服务器状态失败: ${tftp.reason}`, "error");
+    if (sftp.status === "fulfilled") setSftpStatus(sftp.value);
+    else log(`读取 SFTP 服务器状态失败: ${sftp.reason}`, "error");
   }, [log]);
 
   useEffect(() => {
@@ -80,6 +89,7 @@ export default function App() {
     const unlisten = [
       onServerState("ftp", setFtpStatus),
       onServerState("tftp", setTftpStatus),
+      onServerState<SftpServerStatus>("sftp", setSftpStatus),
     ];
     return () => {
       unlisten.forEach((p) => p.then((f) => f()));
@@ -93,7 +103,7 @@ export default function App() {
       switch (ev.phase) {
         case "started":
           setProgress({ file: ev.file, kind: ev.kind, bytes: 0, total: ev.total ?? null });
-          log(`${ev.kind === "upload" ? "上传" : "下载"}开始: ${ev.file}`);
+          log(`${transferLabel(ev.kind)}开始: ${ev.file}`);
           break;
         case "progress":
           setProgress({
@@ -146,11 +156,13 @@ export default function App() {
               log={log}
               ftpStatus={ftpStatus}
               tftpStatus={tftpStatus}
+              sftpStatus={sftpStatus}
               refresh={refreshServers}
             />
           )}
           {view === "ftp" && <FtpClientView log={log} />}
           {view === "tftp" && <TftpClientView log={log} />}
+          {view === "sftp-client" && <SftpClientView log={log} />}
           {view === "logs" && <LogView logs={logs} onClear={() => setLogs([])} />}
         </main>
         <ProgressBar progress={progress} />

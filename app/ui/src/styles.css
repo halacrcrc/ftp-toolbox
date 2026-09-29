@@ -226,6 +226,105 @@ button {
   gap: 4px 10px;
 }
 
+/* ---------- 折叠指纹区（FTPS 证书 / SFTP 主机密钥共用，设计文档 §4.3） ---------- */
+
+.fingerprint-toggle {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  border: none;
+  background: transparent;
+  padding: 2px 0;
+  margin: -4px 0 8px;
+  font-size: 12.5px;
+  color: var(--text-2);
+  cursor: pointer;
+}
+
+.fingerprint-toggle:hover {
+  color: var(--text);
+}
+
+/* chevron 旋转指示：随 aria-expanded 状态驱动 */
+.fingerprint-chevron {
+  flex: 0 0 auto;
+  transition: transform 0.15s;
+}
+
+.fingerprint-toggle[aria-expanded="true"] .fingerprint-chevron {
+  transform: rotate(90deg);
+}
+
+/* 0fr→1fr 折叠动画：轨道高度由内容真实高度驱动，不需要 max-height 魔法数字；
+   内层 overflow:hidden + min-height:0 是动画生效的必要配套 */
+.fingerprint-collapse {
+  display: grid;
+  grid-template-rows: 0fr;
+  transition: grid-template-rows 0.2s ease;
+}
+
+.fingerprint-collapse.open {
+  grid-template-rows: 1fr;
+}
+
+.fingerprint-inner {
+  overflow: hidden;
+  min-height: 0;
+}
+
+.fingerprint-body {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 4px 10px;
+  font-size: 12.5px;
+  line-height: 1.5;
+  color: var(--text-2);
+  padding-bottom: 12px;
+}
+
+.fingerprint-value {
+  font-family: Consolas, "Courier New", monospace;
+  word-break: break-all;
+  user-select: text;
+}
+
+/* ---------- 授权公钥列表（SFTP 卡片） ---------- */
+
+.key-list {
+  list-style: none;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  margin-top: 8px;
+}
+
+.key-item {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+}
+
+/* 公钥行等宽展示；RSA 公钥可达数百字符，break-all 保证不撑破卡片 */
+.key-line {
+  flex: 1;
+  min-width: 0;
+  font-family: Consolas, "Courier New", monospace;
+  font-size: 12px;
+  line-height: 1.6;
+  word-break: break-all;
+  color: var(--text-2);
+  background: #f8f9fa;
+  border: 1px solid var(--border);
+  border-radius: 7px;
+  padding: 5px 10px;
+  user-select: text;
+}
+
+.key-item .btn {
+  flex: 0 0 auto;
+}
+
 /* ---------- form ---------- */
 
 .field {
@@ -289,6 +388,12 @@ button {
   display: flex;
   gap: 8px;
   align-items: center;
+}
+
+/* input-row 里跟在按钮后面的弱化说明（如「共 3 条」），不抢输入框的视觉层级 */
+.hint-inline {
+  font-size: 12.5px;
+  color: var(--text-3);
 }
 
 .input-row .grow {
@@ -552,6 +657,48 @@ button {
   color: var(--text-2);
   font-variant-numeric: tabular-nums;
   white-space: nowrap;
+}
+
+/* ---------- 模态框（SFTP 主机密钥确认等） ---------- */
+
+.modal-overlay {
+  position: fixed;
+  inset: 0;
+  background: rgba(15, 23, 42, 0.35);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 24px;
+  z-index: 100;
+}
+
+.modal-card {
+  width: min(480px, 100%);
+}
+
+/* 模态框里的指纹：等宽 + break-all，与折叠指纹区同一套展示规则 */
+.modal-fingerprint {
+  font-family: Consolas, "Courier New", monospace;
+  font-size: 13px;
+  line-height: 1.6;
+  word-break: break-all;
+  user-select: text;
+  background: #f8f9fa;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 10px 12px;
+  margin: 10px 0 14px;
+}
+
+/* ---------- 动效偏好 ---------- */
+
+/* 前端动画都是「锦上添花」型（折叠展开 / chevron 旋转），对偏好减少动效的
+   用户直接关闭过渡即可，不影响任何功能状态 */
+@media (prefers-reduced-motion: reduce) {
+  .fingerprint-collapse,
+  .fingerprint-chevron {
+    transition: none;
+  }
 }
 
 /* ---------- 窄窗口适配 ---------- */

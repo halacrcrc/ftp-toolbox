@@ -18,7 +18,12 @@ use time::OffsetDateTime;
 use crate::error::{Error, Result};
 
 /// Where the certificate lives plus its SHA-256 fingerprint.
+///
+/// `rename_all = "camelCase"` 是前端契约的一部分：`api.ts` 的 `CertInfo`
+/// 读的是 `certPath` / `keyPath`，漏掉这行这两个字段会以蛇形命名序列化出去，
+/// 前端静默拿到 `undefined`。
 #[derive(Debug, Clone, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
 pub struct CertInfo {
     /// SHA-256 over the certificate DER, colon-separated hex (OpenSSH style).
     pub fingerprint: String,
@@ -172,5 +177,19 @@ mod tests {
     #[test]
     fn fingerprint_rejects_garbage() {
         assert!(fingerprint_of_file(Path::new("definitely-missing.pem")).is_err());
+    }
+
+    /// 前端 `api.ts` 的 `CertInfo` 读 `certPath` / `keyPath`。
+    /// 这里钉死 JSON 字段名，防止再出现"后端蛇形 / 前端驼峰"的静默字段丢失。
+    #[test]
+    fn cert_info_serializes_with_camel_case_paths() {
+        let (cert, key) = temp_pair("serde-contract");
+        let info = load_or_generate(&cert, &key).unwrap();
+        let json = serde_json::to_value(&info).unwrap();
+        assert!(json.get("fingerprint").is_some(), "缺 fingerprint: {json}");
+        assert!(json.get("certPath").is_some(), "certPath 未按 camelCase 序列化: {json}");
+        assert!(json.get("keyPath").is_some(), "keyPath 未按 camelCase 序列化: {json}");
+        assert!(json.get("cert_path").is_none(), "不该出现蛇形 cert_path: {json}");
+        assert!(json.get("key_path").is_none(), "不该出现蛇形 key_path: {json}");
     }
 }

@@ -13,6 +13,10 @@ pub type ProgressTx = mpsc::UnboundedSender<TransferEvent>;
 pub enum TransferKind {
     Upload,
     Download,
+    /// SFTP upload (progress events use the remote path as the file id).
+    SftpUpload,
+    /// SFTP download.
+    SftpDownload,
 }
 
 /// Lifecycle of one file transfer, serialized with a `phase` tag so the

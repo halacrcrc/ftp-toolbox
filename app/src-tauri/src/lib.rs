@@ -3,6 +3,7 @@
 //! lifecycles (server handles, the connected FTP client) and forward
 //! progress events to the frontend.
 
+use std::net::IpAddr;
 use std::ops::Range;
 use std::path::PathBuf;
 use std::sync::Mutex;
@@ -10,10 +11,14 @@ use std::sync::Mutex;
 use ftp_core::ftp::passive;
 use ftp_core::ftp::{FtpsMode, FtpAuth, FtpClient, FtpServerHandle, FtpServerOptions};
 use ftp_core::lifecycle::ServerState;
+use ftp_core::sftp::{
+    HostKeyInfo, HostKeyStatus, SftpClient, SftpClientConfig, SftpEntry, SftpServerConfig,
+    SftpServerHandle,
+};
 use ftp_core::tftp::TftpServerHandle;
 use ftp_core::{tls, ProgressTx};
 use tauri::{AppHandle, Emitter, Manager, State};
-use tokio::sync::{watch, Mutex as AsyncMutex};
+use tokio::sync::{broadcast, watch, Mutex as AsyncMutex};
 
 #[derive(Default)]
 struct AppState {
@@ -21,10 +26,17 @@ struct AppState {
     ftp_server: Mutex<Option<FtpServerHandle>>,
     /// Running TFTP server, if any.
     tftp_server: Mutex<Option<TftpServerHandle>>,
+    /// Running SFTP server: handle + the shutdown-channel sender that keeps
+    /// the engine's app-lifetime receiver alive. Async mutex because stop
+    /// has to await the accept loop while holding the slot.
+    sftp_server: AsyncMutex<Option<SftpServerState>>,
     /// The single connected FTP client session. Behind a tokio (async)
     /// mutex because commands hold it across .await points — a std mutex
     /// guard held over .await would risk deadlock and isn't Send here.
     ftp_client: AsyncMutex<Option<FtpClient>>,
+    /// The single connected SFTP client session (same reasoning as above;
+    /// TOFU 信任状态在磁盘 known_hosts，不在这里).
+    sftp_client: AsyncMutex<Option<SftpClient>>,
 }
 
 type CmdResult<T> = Result<T, String>;
@@ -696,6 +708,346 @@ async fn tftp_download(
     Ok(format!("下载完成: {remote}"))
 }
 
+// ---------- SFTP（契约：docs/sftp-design.md §3；线格式见 app/ui/src/api.ts） ----------
+
+/// start_sftp_server 的入参 DTO。嵌套结构不走 Tauri 顶层参数的自动蛇形
+/// 转换，字段按前端 SftpServerOptions 的 camelCase 原样反序列化。
+#[derive(serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct SftpServerOptions {
+    bind_addr: String,
+    port: u16,
+    username: String,
+    password: String,
+    authorized_keys: Vec<String>,
+    root_dir: String,
+    read_only: bool,
+}
+
+/// start_sftp_server 的返回。Q12：指纹走结构化数据进折叠区展示，
+/// 不拼进提示消息。
+#[derive(serde::Serialize, Clone)]
+#[serde(rename_all = "camelCase")]
+struct SftpServerInfo {
+    port: u16,
+    addr: String,
+    host_key: Option<HostKeyInfo>,
+}
+
+/// `sftp_server_status` / `sftp-server-state` 事件的载荷：ServerStatus 形状
+/// 外加 hostKey。hostKey 与运行状态解耦（§4.3 不变量：折叠指纹区不随开关
+/// 消失），未运行时也从磁盘读。
+///
+/// `rename_all = "camelCase"` 必须与 [`SftpServerInfo`] 保持一致：前端
+/// `SftpServerStatus.hostKey` 读的是 camelCase，漏掉这行会让 `host_key`
+/// 以蛇形命名序列化出去，指纹区永远拿不到值。
+#[derive(serde::Serialize, Clone)]
+#[serde(rename_all = "camelCase")]
+struct SftpServerStatus {
+    #[serde(flatten)]
+    base: ServerStatus,
+    host_key: Option<HostKeyInfo>,
+}
+
+/// 引擎要求的 app-lifetime shutdown 通道在这里闭环：发送端存进状态，
+/// 停止（或应用退出）时随句柄一起 drop，接收端读到通道关闭即结束循环。
+struct SftpServerState {
+    handle: SftpServerHandle,
+    _shutdown_tx: broadcast::Sender<()>,
+}
+
+/// SFTP 版 spawn_state_forwarder：载荷多带一个 hostKey。
+fn spawn_sftp_state_forwarder(
+    app: &AppHandle,
+    mut rx: watch::Receiver<ServerState>,
+    addr: Option<String>,
+    local_addr: Option<String>,
+    root: Option<String>,
+    host_key: Option<HostKeyInfo>,
+) {
+    let app = app.clone();
+    tauri::async_runtime::spawn(async move {
+        loop {
+            let status = SftpServerStatus {
+                base: ServerStatus::from_state(
+                    *rx.borrow_and_update(),
+                    addr.clone(),
+                    local_addr.clone(),
+                    root.clone(),
+                ),
+                host_key: host_key.clone(),
+            };
+            let _ = app.emit("sftp-server-state", status);
+            if rx.changed().await.is_err() {
+                break;
+            }
+        }
+    });
+}
+
+/// 从磁盘读主机密钥信息（首调生成）。ed25519 生成放阻塞线程池，
+/// 镜像 ftps_cert_info 的处理方式。
+async fn load_host_key_info(app: &AppHandle) -> CmdResult<HostKeyInfo> {
+    let app_data = app.path().app_data_dir().map_err(err)?;
+    tauri::async_runtime::spawn_blocking(move || {
+        ftp_core::sftp::keys::load_or_generate_host_key(&app_data).map(|(_, info)| info).map_err(err)
+    })
+    .await
+    .map_err(|e| format!("后台任务失败: {e}"))?
+}
+
+#[tauri::command]
+async fn start_sftp_server(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    opts: SftpServerOptions,
+) -> CmdResult<SftpServerInfo> {
+    // 与 FTP/TFTP 相同的守卫：重复启动只报错，不悄悄顶掉正在运行的服务。
+    {
+        let mut guard = state.sftp_server.lock().await;
+        if let Some(s) = guard.as_ref() {
+            if s.handle.is_running() {
+                return Err(format!("SFTP 服务器已在运行（监听 {}），请先停止", s.handle.local_addr));
+            }
+            guard.take(); // 监听任务已退出的失效句柄
+        }
+    }
+
+    let bind_addr: IpAddr = opts
+        .bind_addr
+        .parse()
+        .map_err(|_| format!("监听地址无效：{}", opts.bind_addr))?;
+    let cfg = SftpServerConfig {
+        bind_addr,
+        port: opts.port,
+        username: opts.username,
+        password: opts.password,
+        authorized_keys: opts.authorized_keys,
+        root_dir: PathBuf::from(&opts.root_dir),
+        read_only: opts.read_only,
+    };
+    let app_data = app.path().app_data_dir().map_err(err)?;
+    let (shutdown_tx, shutdown_rx) = broadcast::channel(1);
+    let handle = ftp_core::sftp::start_sftp_server(
+        cfg,
+        &app_data,
+        shutdown_rx,
+        progress_forwarder(&app),
+    )
+    .await
+    .map_err(err)?;
+
+    let rx = handle.subscribe();
+    let info = SftpServerInfo {
+        port: handle.port,
+        addr: handle.local_addr.clone(),
+        host_key: Some(handle.host_key.clone()),
+    };
+    let host_key = handle.host_key.clone();
+    let local = handle.local_addr.clone();
+    let configured = handle.addr.clone();
+    let root = handle.root.display().to_string();
+    {
+        let mut guard = state.sftp_server.lock().await;
+        if let Some(old) = guard.replace(SftpServerState { handle, _shutdown_tx: shutdown_tx }) {
+            tracing::warn!(addr = %old.handle.addr, "replaced a stale SFTP server handle");
+        }
+    }
+    spawn_sftp_state_forwarder(
+        &app,
+        rx,
+        Some(configured),
+        Some(local.clone()),
+        Some(root),
+        Some(host_key),
+    );
+    log_firewall_hint("SFTP 服务器", &local);
+    Ok(info)
+}
+
+#[tauri::command]
+async fn stop_sftp_server(state: State<'_, AppState>) -> CmdResult<String> {
+    let s = state.sftp_server.lock().await.take();
+    match s {
+        Some(s) => {
+            let local = s.handle.local_addr.clone();
+            s.handle.stop().await; // signal + wait：返回时端口已释放
+            Ok(format!("SFTP 服务器已停止：{local}"))
+        }
+        None => Err("SFTP 服务器未运行".into()),
+    }
+}
+
+/// 镜像 ftp_server_status，快照多一个 hostKey；失效句柄同样顺手清掉。
+#[tauri::command]
+async fn sftp_server_status(
+    app: AppHandle,
+    state: State<'_, AppState>,
+) -> CmdResult<SftpServerStatus> {
+    let mut guard = state.sftp_server.lock().await;
+    if let Some(s) = guard.as_ref() {
+        if !s.handle.is_running() {
+            let (addr, host_key) = (s.handle.addr.clone(), s.handle.host_key.clone());
+            guard.take();
+            return Ok(SftpServerStatus {
+                base: ServerStatus::stopped(format!("{addr} 的监听任务已退出")),
+                host_key: Some(host_key),
+            });
+        }
+    }
+    match guard.as_ref() {
+        Some(s) => Ok(SftpServerStatus {
+            base: ServerStatus::from_state(
+                s.handle.state(),
+                Some(s.handle.addr.clone()),
+                Some(s.handle.local_addr.clone()),
+                Some(s.handle.root.display().to_string()),
+            ),
+            host_key: Some(s.handle.host_key.clone()),
+        }),
+        None => {
+            let host_key = load_host_key_info(&app).await?;
+            Ok(SftpServerStatus {
+                base: ServerStatus::stopped("未启动"),
+                host_key: Some(host_key),
+            })
+        }
+    }
+}
+
+/// 重新生成主机密钥（镜像 ftps_regenerate_cert）：指纹会变，已信任过旧指纹的
+/// 对端会察觉。运行中的服务继续用旧密钥，下次启动生效。
+#[tauri::command]
+async fn sftp_server_regenerate_host_key(app: AppHandle) -> CmdResult<HostKeyInfo> {
+    let app_data = app.path().app_data_dir().map_err(err)?;
+    tauri::async_runtime::spawn_blocking(move || {
+        ftp_core::sftp::keys::regenerate_host_key(&app_data).map_err(err)
+    })
+    .await
+    .map_err(|e| format!("后台任务失败: {e}"))?
+}
+
+// ---------- SFTP client（TOFU 流程见设计文档 §2.4） ----------
+
+/// TOFU 连接前检查：拿不到在线指纹（主机不可达）不算错 —— 有记录按记录答，
+/// 没有记录答 unknown；真正的比对发生在 connect 握手时。
+#[tauri::command]
+async fn sftp_client_check_host_key(
+    app: AppHandle,
+    host: String,
+    port: u16,
+) -> CmdResult<HostKeyStatus> {
+    let app_data = app.path().app_data_dir().map_err(err)?;
+    let presented = SftpClient::fetch_host_fingerprint(&host, port).await.ok();
+    if presented.is_none() {
+        tracing::debug!("无法获取 {host}:{port} 的在线主机密钥指纹（可能不可达），按本地记录回答");
+    }
+    Ok(ftp_core::sftp::keys::check_known_host(
+        &app_data,
+        &host,
+        port,
+        presented.as_deref(),
+    ))
+}
+
+#[tauri::command]
+async fn sftp_client_connect(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    host: String,
+    port: u16,
+    username: String,
+    password: String,
+    trust_new_host: bool,
+) -> CmdResult<String> {
+    let app_data = app.path().app_data_dir().map_err(err)?;
+    let cfg = SftpClientConfig { host: host.clone(), port, username, password };
+    // ConnectError 的 Display 已面向用户（含 unknown/changed 的指引文案）。
+    let client = SftpClient::connect(cfg, &app_data, trust_new_host).await.map_err(err)?;
+    let mut guard = state.sftp_client.lock().await;
+    if let Some(old) = guard.replace(client) {
+        let _ = old.disconnect().await;
+    }
+    Ok(format!("已连接 {host}:{port}"))
+}
+
+#[tauri::command]
+async fn sftp_client_disconnect(state: State<'_, AppState>) -> CmdResult<String> {
+    let mut guard = state.sftp_client.lock().await;
+    match guard.take() {
+        Some(client) => {
+            client.disconnect().await.map_err(err)?;
+            Ok("已断开".into())
+        }
+        None => Err("未连接".into()),
+    }
+}
+
+#[tauri::command]
+async fn sftp_client_list(
+    state: State<'_, AppState>,
+    path: Option<String>,
+) -> CmdResult<Vec<SftpEntry>> {
+    let guard = state.sftp_client.lock().await;
+    let client = guard.as_ref().ok_or("未连接 SFTP 服务器")?;
+    client.list(path.as_deref().unwrap_or("/")).await.map_err(err)
+}
+
+#[tauri::command]
+async fn sftp_client_upload(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    local_path: String,
+    remote_path: String,
+) -> CmdResult<String> {
+    let tx = progress_forwarder(&app);
+    let guard = state.sftp_client.lock().await;
+    let client = guard.as_ref().ok_or("未连接 SFTP 服务器")?;
+    client
+        .upload_file(std::path::Path::new(&local_path), &remote_path, Some(tx))
+        .await
+        .map_err(err)?;
+    Ok(format!("上传完成: {remote_path}"))
+}
+
+#[tauri::command]
+async fn sftp_client_download(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    remote_path: String,
+    local_path: String,
+) -> CmdResult<String> {
+    let tx = progress_forwarder(&app);
+    let guard = state.sftp_client.lock().await;
+    let client = guard.as_ref().ok_or("未连接 SFTP 服务器")?;
+    client
+        .download_file(&remote_path, std::path::Path::new(&local_path), Some(tx))
+        .await
+        .map_err(err)?;
+    Ok(format!("下载完成: {remote_path}"))
+}
+
+/// 主机密钥变化后，用户显式确认才允许覆盖 known_hosts 记录（§2.4）。
+/// 只接受服务器“当前”出示的指纹 —— 先探在线再写盘，不允许凭空指定。
+#[tauri::command]
+async fn sftp_client_update_known_host(
+    app: AppHandle,
+    host: String,
+    port: u16,
+) -> CmdResult<String> {
+    let app_data = app.path().app_data_dir().map_err(err)?;
+    let presented = SftpClient::fetch_host_fingerprint(&host, port).await.map_err(err)?;
+    ftp_core::sftp::keys::update_known_host(&app_data, &host, port, &presented).map_err(err)?;
+    Ok(format!("已更新 {host}:{port} 的主机密钥记录（新指纹 {presented}）"))
+}
+
+#[tauri::command]
+async fn sftp_client_clear_known_hosts(app: AppHandle) -> CmdResult<String> {
+    let app_data = app.path().app_data_dir().map_err(err)?;
+    ftp_core::sftp::keys::clear_known_hosts(&app_data).map_err(err)?;
+    Ok("已清除所有已信任主机的记录".into())
+}
+
 // ---------- system info ----------
 
 #[derive(serde::Serialize)]
@@ -943,6 +1295,18 @@ pub fn run() {
             ftp_download,
             tftp_upload,
             tftp_download,
+            start_sftp_server,
+            stop_sftp_server,
+            sftp_server_status,
+            sftp_server_regenerate_host_key,
+            sftp_client_check_host_key,
+            sftp_client_connect,
+            sftp_client_disconnect,
+            sftp_client_list,
+            sftp_client_upload,
+            sftp_client_download,
+            sftp_client_update_known_host,
+            sftp_client_clear_known_hosts,
             list_interfaces,
         ])
         .run(tauri::generate_context!())

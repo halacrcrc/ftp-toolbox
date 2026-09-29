@@ -11,7 +11,24 @@ import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { open, save } from "@tauri-apps/plugin-dialog";
 
-export type TransferKind = "upload" | "download";
+/**
+ * 后端 `TransferKind` 枚举序列化后的字符串（progress 事件复用，SFTP 变体见
+ * 设计文档 §3）。后端枚举当前是 `rename_all = "lowercase"`，故 SftpUpload/
+ * SftpDownload 序列化为 "sftpupload"/"sftpdownload"；若后端改用 camelCase 则
+ * 是 "sftpUpload"/"sftpDownload" —— 两种拼写都收录，展示统一走 transferLabel。
+ */
+export type TransferKind =
+  | "upload"
+  | "download"
+  | "sftpupload"
+  | "sftpdownload"
+  | "sftpUpload"
+  | "sftpDownload";
+
+/** 传输方向 → 中文标签（日志 / 进度条用）。 */
+export function transferLabel(kind: string): "上传" | "下载" {
+  return kind.toLowerCase().endsWith("download") ? "下载" : "上传";
+}
 
 export interface TransferEvent {
   phase: "started" | "progress" | "done" | "error";
@@ -50,6 +67,15 @@ export interface ServerStatus {
   detail: string;
 }
 
+/**
+ * SFTP 服务器运行态快照：镜像 ServerStatus，外加主机密钥信息
+ * （密钥 load-or-generate 持久化在 app-data/keys/，与运行状态解耦，
+ * 折叠指纹区靠它展示，见设计文档 §4.3）。
+ */
+export interface SftpServerStatus extends ServerStatus {
+  hostKey: HostKeyInfo | null;
+}
+
 /** 被动端口段与系统保留段的比对结果。 */
 export interface PassivePortCheck {
   /** 与「普通排除段」无重叠 —— 只有这类才会真正挡住绑定 */
@@ -73,6 +99,53 @@ export interface CertInfo {
   fingerprint: string;
   certPath: string;
   keyPath: string;
+}
+
+// ---------- SFTP（契约：docs/sftp-design.md §3；DTO 按现有惯例 camelCase 序列化） ----------
+
+/** SFTP 主机密钥信息（服务端折叠区展示 / TOFU 校验用）。 */
+export interface HostKeyInfo {
+  /** 密钥算法，如 "ssh-ed25519" */
+  algorithm: string;
+  /** OpenSSH 风格指纹 "SHA256:<base64>"（与 `ssh-keygen -lf` 一致，便于跨工具核对） */
+  fingerprint: string;
+}
+
+/** TOFU 主机密钥校验结果（sftp_client_check_host_key）。 */
+export type HostKeyStatusKind = "known" | "unknown" | "changed";
+
+export interface HostKeyStatus {
+  status: HostKeyStatusKind;
+  /** unknown / changed 时为服务器当前指纹；known 时为 null */
+  fingerprint: string | null;
+}
+
+/** start_sftp_server 的选项，与后端 SftpServerOptions 字段一一对应。 */
+export interface SftpServerOptions {
+  bindAddr: string;
+  port: number;
+  username: string;
+  password: string;
+  /** OpenSSH 格式公钥行（ssh-ed25519 / ssh-rsa / ecdsa-*），与密码任一通过即放行 */
+  authorizedKeys: string[];
+  rootDir: string;
+  readOnly: boolean;
+}
+
+export interface SftpServerInfo {
+  port: number;
+  addr: string;
+  hostKey: HostKeyInfo | null;
+}
+
+/** SFTP 远端目录条目；字段与 FTP 客户端的列表行对齐，便于复用行渲染。 */
+export interface SftpEntry {
+  name: string;
+  /** 条目类型（目录/文件/链接等），取值以后端实现为准 */
+  fileType: string;
+  size: number;
+  /** 修改时间（Unix 秒）；未知为 null */
+  mtime: number | null;
 }
 
 /** Backend tracing event forwarded over "backend-log". */
@@ -140,6 +213,48 @@ export const api = {
   tftpDownload: (server: string, remote: string, local: string) =>
     invoke<string>("tftp_download", { server, remote, local }),
 
+  // ---------- SFTP server ----------
+  // 命令契约见 docs/sftp-design.md §3；opts 对象字段按后端 DTO 的 camelCase
+  // serde 惯例传（与顶层命令参数的自动蛇形转换无关，嵌套结构原样反序列化）。
+  startSftpServer: (opts: SftpServerOptions) =>
+    invoke<SftpServerInfo>("start_sftp_server", { opts }),
+  stopSftpServer: () => invoke<string>("stop_sftp_server"),
+  /** 镜像 ftp_server_status：挂载时查询初始快照，之后靠 sftp-server-state 事件推送。 */
+  sftpServerStatus: () => invoke<SftpServerStatus>("sftp_server_status"),
+  /** 重新生成主机密钥：指纹会变，已信任过旧指纹的对端会察觉。 */
+  sftpServerRegenerateHostKey: () =>
+    invoke<HostKeyInfo>("sftp_server_regenerate_host_key"),
+
+  // ---------- SFTP client（TOFU 流程见设计文档 §2.4 / §4.4） ----------
+  sftpClientCheckHostKey: (host: string, port: number) =>
+    invoke<HostKeyStatus>("sftp_client_check_host_key", { host, port }),
+  sftpClientConnect: (
+    host: string,
+    port: number,
+    username: string,
+    password: string,
+    trustNewHost: boolean
+  ) =>
+    invoke<string>("sftp_client_connect", {
+      host,
+      port,
+      username,
+      password,
+      trustNewHost,
+    }),
+  sftpClientDisconnect: () => invoke<string>("sftp_client_disconnect"),
+  sftpClientList: (path?: string) =>
+    invoke<SftpEntry[]>("sftp_client_list", { path: path ?? null }),
+  sftpClientUpload: (localPath: string, remotePath: string) =>
+    invoke<string>("sftp_client_upload", { localPath, remotePath }),
+  sftpClientDownload: (remotePath: string, localPath: string) =>
+    invoke<string>("sftp_client_download", { remotePath, localPath }),
+  /** 主机密钥变化后，用户显式确认才允许覆盖 known_hosts 记录。 */
+  sftpClientUpdateKnownHost: (host: string, port: number) =>
+    invoke<string>("sftp_client_update_known_host", { host, port }),
+  sftpClientClearKnownHosts: () =>
+    invoke<string>("sftp_client_clear_known_hosts"),
+
   listInterfaces: () => invoke<NetInterface[]>("list_interfaces"),
 };
 
@@ -181,16 +296,20 @@ export function onBackendLog(cb: (ev: BackendLog) => void) {
   return listen<BackendLog>("backend-log", (e) => cb(e.payload));
 }
 
-export type ServerKind = "ftp" | "tftp";
+export type ServerKind = "ftp" | "tftp" | "sftp";
 
 /**
  * 订阅服务器运行态变化（启动、停止、意外退出、会话数增减）。
  *
  * 状态变化是后端主动推的，所以服务自己挂掉也会立刻反映到界面，不需要用户
- * 去点「刷新」或切页触发重新查询。
+ * 去点「刷新」或切页触发重新查询。SFTP 的快照比其余两种多一个 hostKey 字段
+ * （SftpServerStatus），故做成泛型。
  */
-export function onServerState(kind: ServerKind, cb: (status: ServerStatus) => void) {
-  return listen<ServerStatus>(`${kind}-server-state`, (e) => cb(e.payload));
+export function onServerState<T extends ServerStatus = ServerStatus>(
+  kind: ServerKind,
+  cb: (status: T) => void
+) {
+  return listen<T>(`${kind}-server-state`, (e) => cb(e.payload));
 }
 
 export function fmtBytes(n: number): string {

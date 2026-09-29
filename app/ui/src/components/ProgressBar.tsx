@@ -1,4 +1,4 @@
-import { fmtBytes } from "../api";
+import { fmtBytes, transferLabel } from "../api";
 import { Progress } from "../App";
 
 export default function ProgressBar({ progress }: { progress: Progress | null }) {
@@ -10,7 +10,7 @@ export default function ProgressBar({ progress }: { progress: Progress | null })
   return (
     <footer className="progress-footer">
       <span className="progress-label">
-        {progress.kind === "upload" ? "上传中" : "下载中"} · {progress.file}
+        {transferLabel(progress.kind)}中 · {progress.file}
       </span>
       <div className="progress-track">
         <div

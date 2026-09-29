@@ -4,6 +4,7 @@ node_modules
 app/ui/dist
 /dist
 .workbuddy/
+.workbuddy-ai/
 
 # 一次性网络诊断脚手架（防止误提交）
 .push.js

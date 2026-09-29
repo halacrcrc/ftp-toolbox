@@ -1,5 +1,15 @@
 import { useCallback, useEffect, useRef, useState } from "react";
-import { api, pickFolder, CertInfo, NetInterface, PassivePortCheck, ServerStatus } from "../api";
+import {
+  api,
+  pickFolder,
+  CertInfo,
+  HostKeyInfo,
+  NetInterface,
+  PassivePortCheck,
+  ServerStatus,
+  SftpServerStatus,
+} from "../api";
+import FingerprintBlock from "../components/FingerprintBlock";
 import { LogEntry } from "../App";
 
 type Log = (text: string, level?: LogEntry["level"]) => void;
@@ -9,6 +19,7 @@ type Log = (text: string, level?: LogEntry["level"]) => void;
 const IS_WINDOWS = navigator.userAgent.includes("Windows");
 const DEFAULT_FTP_ROOT = IS_WINDOWS ? "C:\\ftp-root" : "";
 const DEFAULT_TFTP_ROOT = IS_WINDOWS ? "C:\\tftp-root" : "";
+const DEFAULT_SFTP_ROOT = IS_WINDOWS ? "C:\\sftp-root" : "";
 
 // ---------- persisted per-server preferences ----------
 
@@ -22,6 +33,10 @@ interface ServerPrefs {
   passive: string;
   /** 启用 FTPS（显式 TLS；明文客户端仍可连 —— 服务端是可选 TLS）。 */
   ftps: boolean;
+  /** SFTP：授权公钥行（OpenSSH 格式）。公钥不是机密，随其它配置一起持久化。 */
+  authorizedKeys: string[];
+  /** SFTP：只读模式（拒绝写入/删除/重命名等修改操作）。 */
+  readOnly: boolean;
 }
 
 function loadPrefs(key: string, fallback: ServerPrefs): ServerPrefs {
@@ -63,6 +78,22 @@ function interfaceLabel(it: NetInterface): string {
   return parts.join(" · ");
 }
 
+// 仅接受 OpenSSH 公钥行（设计文档 Q10）：算法名 + base64 主体 + 可选注释尾。
+// authorized_keys 里常见的注释、空行与 # 注释由调用方先行过滤。
+const KEY_LINE_RE = /^(ssh-ed25519|ssh-rsa|ecdsa-sha2-[a-z0-9-]+)\s+([A-Za-z0-9+/=]+)(\s+.*)?$/;
+
+/**
+ * 公钥行截断展示：算法 + 缩略主体 + 注释（title 悬浮可看全文）。
+ * RSA 公钥主体可达数百字符，整行铺开会让卡片失去可读性。
+ */
+function formatKeyLine(line: string): string {
+  const m = KEY_LINE_RE.exec(line);
+  if (!m) return line.length > 64 ? `${line.slice(0, 64)}…` : line;
+  const [, type, body, comment] = m;
+  const short = body.length > 32 ? `${body.slice(0, 24)}…${body.slice(-8)}` : body;
+  return comment ? `${type} ${short} ${comment.trim()}` : `${type} ${short}`;
+}
+
 // ---------- server card ----------
 
 interface ServerCardProps {
@@ -77,8 +108,15 @@ interface ServerCardProps {
   /** 是否暴露被动数据端口段（只有 FTP 需要）。 */
   withPassive?: boolean;
   defaultPassive?: string;
-  /** 是否暴露 FTPS（显式 TLS）开关与证书指纹（只有 FTP 需要）。 */
+  /** 是否暴露 FTPS（显式 TLS）开关与证书折叠区（只有 FTP 需要）。 */
   withFtps?: boolean;
+  /**
+   * 是否为 SFTP 卡片：单用户名+密码、授权公钥、只读开关、主机密钥折叠区。
+   * 与 FTP 的「可选匿名」不同，用户名密码始终显示（密码可留空走纯公钥认证）。
+   */
+  withSftp?: boolean;
+  /** SFTP：当前主机密钥（来自状态快照/事件推送，后端 load-or-generate 持久化）。 */
+  hostKey?: HostKeyInfo | null;
   interfaces: NetInterface[];
   /** 网卡列表是否已成功读到过 —— 与「列表是不是空的」是两件事。 */
   interfacesLoaded: boolean;
@@ -90,7 +128,9 @@ interface ServerCardProps {
     user?: string,
     pass?: string,
     passivePorts?: string,
-    ftps?: boolean
+    ftps?: boolean,
+    /** withSftp 时的附加启动选项。 */
+    sftp?: { authorizedKeys: string[]; readOnly: boolean }
   ) => Promise<string>;
   onStop: () => Promise<string>;
   /** Re-read server state (and interfaces) from the backend. */
@@ -100,7 +140,7 @@ interface ServerCardProps {
 
 function ServerCard({
   serverKey, title, desc, defaultRoot, defaultPort, portHint,
-  withAuth, withPassive, defaultPassive = "", withFtps,
+  withAuth, withPassive, defaultPassive = "", withFtps, withSftp, hostKey: hostKeyProp,
   interfaces, interfacesLoaded, status, onStart, onStop, onRefresh, log,
 }: ServerCardProps) {
   const storageKey = `ftp-toolbox:server:${serverKey}`;
@@ -113,6 +153,8 @@ function ServerCard({
       user: "admin",
       passive: defaultPassive,
       ftps: false,
+      authorizedKeys: [],
+      readOnly: false,
     })
   );
   const [pass, setPass] = useState(""); // password intentionally NOT persisted
@@ -121,6 +163,16 @@ function ServerCard({
   // FTPS 自签证书指纹。首次启用时后端会生成证书；这里挂载时读一次，
   // 「重新生成」后再读一次。读取失败只影响展示，不拦启动。
   const [cert, setCert] = useState<CertInfo | null>(null);
+  // SFTP 主机密钥：状态推送里带过来（hostKeyProp），「重新生成」后用返回值
+  // 立即刷新。prop 为 null 时不回退 —— 后端停止态快照可能不带密钥信息，
+  // 而指纹要「一直可查」，保留最后已知值。
+  const [hostKey, setHostKey] = useState<HostKeyInfo | null>(null);
+  useEffect(() => {
+    if (hostKeyProp) setHostKey(hostKeyProp);
+  }, [hostKeyProp]);
+  // 授权公钥文件选择器：原生 <input type="file"> 在 webview 内直接读内容，
+  // 不需要后端命令或 fs 权限（dialog 插件只回路径，读不到内容）。
+  const keyFileInput = useRef<HTMLInputElement>(null);
 
   // Run state is owned by the backend, never by this component: switching pages
   // unmounts the card, which used to reset a local `running` flag and made the
@@ -136,8 +188,9 @@ function ServerCard({
   const set = <K extends keyof ServerPrefs>(k: K, v: ServerPrefs[K]) =>
     setPrefs((p) => ({ ...p, [k]: v }));
 
-  // 指纹是给对端核对身份用的，必须一直可查，与开关状态无关
-  // （开着开关才显示会让「关掉再打开」看起来像换了证书）。
+  // 指纹是给对端核对身份用的，必须一直可查，与 FTPS 开关状态无关 —— 折叠区
+  // （FingerprintBlock）永远随卡片渲染，「关掉开关再看」不会让指纹消失，
+  // 也就不会看起来像换了证书。
   useEffect(() => {
     if (!withFtps) return;
     let cancelled = false;
@@ -166,6 +219,55 @@ function ServerCard({
       setBusy(false);
     }
   };
+
+  const regenerateHostKey = async () => {
+    setBusy(true);
+    try {
+      const info = await api.sftpServerRegenerateHostKey();
+      setHostKey(info);
+      log(`已重新生成 SFTP 主机密钥，新指纹 ${info.fingerprint}`);
+    } catch (e) {
+      log(`重新生成主机密钥失败: ${e}`, "error");
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  /**
+   * 载入选中的公钥文件（可多选 .pub / authorized_keys）。每文件按行解析，
+   * 只收 OpenSSH 格式公钥行（KEY_LINE_RE），空行与 # 注释跳过；已在列表里的
+   * 不重复添加。解析结果写日志，跳过多少行一目了然。
+   */
+  const addKeyFiles = async (files: FileList | null) => {
+    if (!files || files.length === 0) return;
+    const picked: string[] = [];
+    let skipped = 0;
+    for (const f of Array.from(files)) {
+      const text = await f.text();
+      for (const raw of text.split(/\r?\n/)) {
+        const line = raw.trim();
+        if (!line || line.startsWith("#")) continue;
+        if (KEY_LINE_RE.test(line)) picked.push(line);
+        else skipped++;
+      }
+    }
+    const existing = new Set(prefs.authorizedKeys);
+    const fresh = picked.filter((k) => !existing.has(k));
+    if (fresh.length > 0) {
+      setPrefs((p) => ({ ...p, authorizedKeys: [...p.authorizedKeys, ...fresh] }));
+    }
+    const parts = [`新增 ${fresh.length} 条`];
+    const dup = picked.length - fresh.length;
+    if (dup > 0) parts.push(`重复 ${dup} 条`);
+    if (skipped > 0) parts.push(`跳过非 OpenSSH 格式 ${skipped} 行`);
+    log(`载入授权公钥：${parts.join("、")}`);
+  };
+
+  const removeKey = (index: number) =>
+    setPrefs((p) => ({
+      ...p,
+      authorizedKeys: p.authorizedKeys.filter((_, i) => i !== index),
+    }));
 
   // Windows keeps blocks of TCP ports for itself (Hyper-V/WSL2 reserve
   // 50000-50059 on this machine, right inside the old default range). libunftp
@@ -264,10 +366,12 @@ function ServerCard({
       const msg = await onStart(
         prefs.root,
         addr,
-        useAccount ? prefs.user : undefined,
-        useAccount ? pass : undefined,
+        // SFTP 无匿名模式：用户名密码始终上送（密码可留空走纯公钥认证）
+        withSftp ? prefs.user : useAccount ? prefs.user : undefined,
+        withSftp ? pass : useAccount ? pass : undefined,
         withPassive ? prefs.passive : undefined,
-        withFtps ? prefs.ftps : undefined
+        withFtps ? prefs.ftps : undefined,
+        withSftp ? { authorizedKeys: prefs.authorizedKeys, readOnly: prefs.readOnly } : undefined
       );
       log(msg, "ok");
     } catch (e) {
@@ -471,23 +575,102 @@ function ServerCard({
               </label>
             </div>
           </label>
-          {/* 指纹常显（不随开关收起）：对端核对服务器身份靠它，
-              「关掉开关再看」会让指纹看起来像是换过证书。 */}
-          {cert && (
-            <div className="hint-line note with-action">
-              <span>
-                证书指纹（SHA-256）：
-                <span style={{ fontFamily: "monospace", wordBreak: "break-all" }}>
-                  {cert.fingerprint}
-                </span>
+          {/* 证书折叠区（Q12 改造）：默认收起、永远随卡片渲染，与开关无关 ——
+              对端核对服务器身份随时可查；指纹长串不再常驻卡片。 */}
+          <FingerprintBlock
+            label="证书详情"
+            fingerprintLabel="证书指纹（SHA-256）"
+            fingerprint={cert?.fingerprint ?? null}
+            onRegenerate={running ? undefined : regenerateCert}
+            busy={busy}
+            emptyHint="证书尚未生成，首次启用 FTPS 时自动创建"
+          />
+        </>
+      )}
+
+      {withSftp && (
+        <>
+          <div className="row">
+            <label className="field grow">
+              <span>用户名</span>
+              <input value={prefs.user} onChange={(e) => set("user", e.target.value)} disabled={running} />
+            </label>
+            <label className="field grow">
+              <span>密码（不保存，可留空走公钥认证）</span>
+              <input
+                type="password"
+                value={pass}
+                onChange={(e) => setPass(e.target.value)}
+                disabled={running}
+              />
+            </label>
+          </div>
+          <div className="field">
+            <span>授权公钥（可选，OpenSSH 格式；与密码任一通过即可登录）</span>
+            <div className="input-row">
+              <button
+                className="btn small"
+                onClick={() => keyFileInput.current?.click()}
+                disabled={running}
+              >
+                添加公钥文件…
+              </button>
+              <span className="hint-inline">
+                {prefs.authorizedKeys.length > 0 ? `共 ${prefs.authorizedKeys.length} 条` : "未配置"}
               </span>
-              {!running && (
-                <button className="btn small" onClick={regenerateCert} disabled={busy}>
-                  重新生成
-                </button>
-              )}
             </div>
-          )}
+            {/* 原生文件选择器只在这里用：读内容必须留在 webview 里（dialog
+                插件只回路径），hidden + 按钮触发保持界面统一 */}
+            <input
+              ref={keyFileInput}
+              type="file"
+              multiple
+              hidden
+              onChange={(e) => {
+                void addKeyFiles(e.target.files);
+                // 清空 value，否则同一文件第二次选择不触发 change
+                e.target.value = "";
+              }}
+            />
+            {prefs.authorizedKeys.length > 0 && (
+              <ul className="key-list">
+                {prefs.authorizedKeys.map((k, i) => (
+                  <li key={`${i}-${k.slice(0, 32)}`} className="key-item">
+                    <span className="key-line" title={k}>
+                      {formatKeyLine(k)}
+                    </span>
+                    <button className="btn small" onClick={() => removeKey(i)} disabled={running}>
+                      移除
+                    </button>
+                  </li>
+                ))}
+              </ul>
+            )}
+          </div>
+          <label className="field">
+            <span>访问模式</span>
+            <div className="radio-row">
+              <label className="radio">
+                <input
+                  type="checkbox"
+                  checked={prefs.readOnly}
+                  onChange={(e) => set("readOnly", e.target.checked)}
+                  disabled={running}
+                />
+                只读模式（拒绝写入/删除/重命名等修改操作）
+              </label>
+            </div>
+          </label>
+          {/* 主机密钥折叠区：默认收起、永远随卡片渲染 —— 对端核对身份随时可查，
+              指纹只在折叠区与 tracing 日志出现（启动成功消息不带指纹，Q12）。 */}
+          <FingerprintBlock
+            label="主机密钥详情"
+            fingerprintLabel="主机密钥指纹（SHA-256）"
+            fingerprint={hostKey?.fingerprint ?? null}
+            onRegenerate={running ? undefined : regenerateHostKey}
+            busy={busy}
+            emptyHint="主机密钥尚未生成，启动服务时自动创建"
+          />
         </>
       )}
 
@@ -564,6 +747,7 @@ interface ServersViewProps {
   log: Log;
   ftpStatus: ServerStatus | null;
   tftpStatus: ServerStatus | null;
+  sftpStatus: SftpServerStatus | null;
   refresh: () => Promise<void>;
 }
 
@@ -577,7 +761,7 @@ interface ServersViewProps {
  */
 const INTERFACE_POLL_MS = 3000;
 
-export default function ServersView({ log, ftpStatus, tftpStatus, refresh }: ServersViewProps) {
+export default function ServersView({ log, ftpStatus, tftpStatus, sftpStatus, refresh }: ServersViewProps) {
   const [interfaces, setInterfaces] = useState<NetInterface[]>([]);
   // 「列表是否已经成功读到过」与「列表是不是空的」是两件事：枚举失败时
   // `interfaces` 会是空数组，但那时说用户选的接口「已掉线」是错的。所以只有
@@ -667,6 +851,44 @@ export default function ServersView({ log, ftpStatus, tftpStatus, refresh }: Ser
         status={tftpStatus}
         onStart={(root, addr) => api.startTftpServer(root, addr)}
         onStop={api.stopTftpServer}
+        onRefresh={refreshAll}
+        log={log}
+      />
+      <ServerCard
+        serverKey="sftp"
+        title="SFTP 服务器"
+        desc="SSH 文件传输；密码或公钥任一通过即可登录"
+        defaultRoot={DEFAULT_SFTP_ROOT}
+        defaultPort="2222"
+        portHint="默认 2222"
+        withSftp
+        interfaces={interfaces}
+        interfacesLoaded={interfacesLoaded}
+        status={sftpStatus}
+        hostKey={sftpStatus?.hostKey ?? null}
+        onStart={(root, addr, user, pass, _passive, _ftps, sftp) => {
+          // ServerCard 统一用 "iface:port" 传地址，SFTP 命令要分开的
+          // bindAddr/port —— 这里拆开（下拉里只有 IPv4，lastIndexOf 够用）
+          const i = addr.lastIndexOf(":");
+          const bindAddr = i < 0 ? addr : addr.slice(0, i);
+          const port = i < 0 ? 2222 : Number(addr.slice(i + 1)) || 2222;
+          return api
+            .startSftpServer({
+              bindAddr,
+              port,
+              username: user ?? "",
+              password: pass ?? "",
+              authorizedKeys: sftp?.authorizedKeys ?? [],
+              rootDir: root,
+              readOnly: sftp?.readOnly ?? false,
+            })
+            // 启动成功消息按契约不带指纹（Q12）；addr 若已含端口则不再重复拼
+            .then((info) => {
+              const target = info.addr.includes(":") ? info.addr : `${info.addr}:${info.port}`;
+              return `SFTP 服务器已启动：sftp://${target}`;
+            });
+        }}
+        onStop={api.stopSftpServer}
         onRefresh={refreshAll}
         log={log}
       />

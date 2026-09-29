@@ -1,6 +1,6 @@
 import iconUrl from "../assets/icon.png";
 
-export type ViewKey = "servers" | "ftp" | "tftp" | "logs";
+export type ViewKey = "servers" | "ftp" | "tftp" | "sftp-client" | "logs";
 
 interface Props {
   active: ViewKey;
@@ -35,6 +35,17 @@ const ITEMS: { key: ViewKey; label: string; icon: JSX.Element }[] = [
     icon: (
       <svg viewBox="0 0 16 16" width="16" height="16" fill="none" stroke="currentColor" strokeWidth="1.5">
         <path d="M5 2v8m0 0L2.5 7.5M5 10l2.5-2.5M11 14V6m0 0 2.5 2.5M11 6 8.5 8.5" strokeLinecap="round" strokeLinejoin="round" />
+      </svg>
+    ),
+  },
+  {
+    key: "sftp-client",
+    label: "SFTP 客户端",
+    icon: (
+      // 终端提示符造型：SFTP 跑在 SSH 之上，与另外两个「文件夹/传输」图标区分开
+      <svg viewBox="0 0 16 16" width="16" height="16" fill="none" stroke="currentColor" strokeWidth="1.5">
+        <rect x="2" y="2.5" width="12" height="11" rx="1.5" />
+        <path d="M4.5 6l2 2-2 2M8 10.5h3.5" strokeLinecap="round" strokeLinejoin="round" />
       </svg>
     ),
   },

@@ -15,6 +15,7 @@ import TftpClientView from "./views/TftpClientView";
 import LogView from "./views/LogView";
 
 export interface LogEntry {
+  id: number;
   time: string;
   level: "info" | "ok" | "error";
   text: string;
@@ -34,6 +35,10 @@ const TITLES: Record<ViewKey, string> = {
   logs: "运行日志",
 };
 
+// 单调递增的日志 id：slice(-499) 截断后行内容整体平移，若用数组下标作 key
+// 会导致所有行的 key 错位。id 跟随行本身，重渲染即稳定。
+let nextLogId = 1;
+
 export default function App() {
   const [view, setView] = useState<ViewKey>("servers");
   const [logs, setLogs] = useState<LogEntry[]>([]);
@@ -48,7 +53,7 @@ export default function App() {
     // keep at most 500 entries so the log view never grows unbounded
     setLogs((ls) => [
       ...ls.slice(-499),
-      { time: new Date().toLocaleTimeString(), level, text },
+      { id: nextLogId++, time: new Date().toLocaleTimeString(), level, text },
     ]);
   }, []);
 

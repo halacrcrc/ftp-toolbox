@@ -1,4 +1,4 @@
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use tokio::fs::File;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -86,60 +86,79 @@ pub async fn download(
         return Err(Error::Timeout);
     }
 
-    let mut out = File::create(local).await?;
-    let mut received: u64 = 0;
-    let mut want: u16 = 1;
+    // Write to `<local>.part` and rename into place only after a clean
+    // finish so an aborted download never leaves a half-written file at the
+    // destination. Any failure inside the block removes the leftover.
+    let mut part_os = local.as_os_str().to_os_string();
+    part_os.push(".part");
+    let part = PathBuf::from(part_os);
+    let written = async {
+        let mut out = File::create(&part).await?;
+        let mut received: u64 = 0;
+        let mut want: u16 = 1;
 
-    // If the classic path already delivered DATA(1), consume it now.
-    if let Some(data) = first_data {
-        let done = data.len() < blksize;
-        out.write_all(&data).await?;
-        received += data.len() as u64;
-        sock.send(&Packet::Ack { block: 1 }.encode()).await?;
-        if done {
-            out.flush().await?;
-            TransferEvent::emit(
-                &progress,
-                TransferEvent::Done { kind: TransferKind::Download, file: name, bytes: received },
-            );
-            return Ok(());
-        }
-        want = 2;
-    }
-
-    // ---- main receive loop ----
-    let mut last_ack = Packet::Ack { block: want.wrapping_sub(1) }.encode();
-    loop {
-        let data = match await_block(&sock, want, &last_ack, &mut buf).await {
-            Ok(d) => d,
-            Err(e) => {
-                emit_err(&progress, TransferKind::Download, &name, &e);
-                return Err(e);
+        // If the classic path already delivered DATA(1), consume it now.
+        if let Some(data) = first_data.take() {
+            let done = data.len() < blksize;
+            out.write_all(&data).await?;
+            received += data.len() as u64;
+            sock.send(&Packet::Ack { block: 1 }.encode()).await?;
+            if done {
+                out.flush().await?;
+                return Ok::<u64, Error>(received);
             }
-        };
-        let done = data.len() < blksize;
-        out.write_all(&data).await?;
-        received += data.len() as u64;
-        last_ack = Packet::Ack { block: want }.encode();
-        sock.send(&last_ack).await?;
-        TransferEvent::emit(
-            &progress,
-            TransferEvent::Progress {
-                kind: TransferKind::Download,
-                file: name.clone(),
-                bytes: received,
-                total: None,
-            },
-        );
-        if done {
-            out.flush().await?;
+            want = 2;
+        }
+
+        // ---- main receive loop ----
+        let mut last_ack = Packet::Ack { block: want.wrapping_sub(1) }.encode();
+        loop {
+            let data = match await_block(&sock, want, &last_ack, &mut buf).await {
+                Ok(d) => d,
+                Err(e) => {
+                    emit_err(&progress, TransferKind::Download, &name, &e);
+                    return Err(e);
+                }
+            };
+            let done = data.len() < blksize;
+            out.write_all(&data).await?;
+            received += data.len() as u64;
+            last_ack = Packet::Ack { block: want }.encode();
+            sock.send(&last_ack).await?;
+            TransferEvent::emit(
+                &progress,
+                TransferEvent::Progress {
+                    kind: TransferKind::Download,
+                    file: name.clone(),
+                    bytes: received,
+                    total: None,
+                },
+            );
+            if done {
+                out.flush().await?;
+                return Ok(received);
+            }
+            want = want.wrapping_add(1);
+        }
+    }
+    .await;
+
+    match written {
+        Ok(received) => {
+            if let Err(e) = tokio::fs::rename(&part, local).await {
+                let _ = tokio::fs::remove_file(&part).await;
+                return Err(e.into());
+            }
             TransferEvent::emit(
                 &progress,
                 TransferEvent::Done { kind: TransferKind::Download, file: name, bytes: received },
             );
-            return Ok(());
+            Ok(())
         }
-        want = want.wrapping_add(1);
+        Err(e) => {
+            let _ = tokio::fs::remove_file(&part).await;
+            Err(e)
+        }
     }
 }
 

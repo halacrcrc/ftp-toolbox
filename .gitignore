@@ -4,3 +4,11 @@ node_modules
 app/ui/dist
 /dist
 .workbuddy/
+
+# 一次性网络诊断脚手架（防止误提交）
+.push.js
+.push-out.txt
+.listen.txt
+.lsremote.txt
+.proxy-probe.txt
+.tnc.txt

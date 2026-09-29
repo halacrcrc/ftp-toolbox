@@ -4,6 +4,12 @@ import { LogEntry } from "../App";
 
 type Log = (text: string, level?: LogEntry["level"]) => void;
 
+// Windows 优先的默认共享目录；其他平台没有 C 盘概念，留空让用户自填或用
+// 「浏览…」选择（后端启动前会校验目录存在性，空值会得到明确报错而非神秘失败）。
+const IS_WINDOWS = navigator.userAgent.includes("Windows");
+const DEFAULT_FTP_ROOT = IS_WINDOWS ? "C:\\ftp-root" : "";
+const DEFAULT_TFTP_ROOT = IS_WINDOWS ? "C:\\tftp-root" : "";
+
 // ---------- persisted per-server preferences ----------
 
 interface ServerPrefs {
@@ -331,6 +337,7 @@ function ServerCard({
             className="grow"
             value={prefs.root}
             onChange={(e) => set("root", e.target.value)}
+            placeholder={defaultRoot ? undefined : "选择或输入共享目录，如 /srv/ftp"}
             disabled={running}
           />
           <button className="btn small" onClick={browse} disabled={running}>
@@ -632,7 +639,7 @@ export default function ServersView({ log, ftpStatus, tftpStatus, refresh }: Ser
         serverKey="ftp"
         title="FTP 服务器"
         desc="支持匿名或账号密码认证"
-        defaultRoot="C:\\ftp-root"
+        defaultRoot={DEFAULT_FTP_ROOT}
         defaultPort="21"
         portHint="默认 21"
         withAuth
@@ -652,7 +659,7 @@ export default function ServersView({ log, ftpStatus, tftpStatus, refresh }: Ser
         serverKey="tftp"
         title="TFTP 服务器"
         desc="支持 blksize 协商（单传可达 500+ MB）"
-        defaultRoot="C:\\tftp-root"
+        defaultRoot={DEFAULT_TFTP_ROOT}
         defaultPort="69"
         portHint="默认 69"
         interfaces={interfaces}

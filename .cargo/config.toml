@@ -1,3 +1,9 @@
+# 本文件包含【本机开发配置】，随仓库分发；在其他机器上构建前请按需调整：
+# - rsproxy 镜像：仅在中国大陆网络环境有意义，其他环境可直接删除 [source.*]
+#   与 [registries.rsproxy] 段落
+# - target-dir：指向作者本机的绝对路径，其他机器必须改成自己的本地路径
+#   （放在仓库外是为了规避 OneDrive 同步对构建脚本的文件锁/占位文件干扰）
+
 # Use rsproxy (字节跳动) mirror for crates.io — much faster in China.
 [source.crates-io]
 replace-with = "rsproxy-sparse"

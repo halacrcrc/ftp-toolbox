@@ -116,9 +116,16 @@ struct ServerConfig {
 
 impl ServerConfig {
     fn build(&self) -> std::result::Result<Server<Filesystem, DefaultUser>, Error> {
+        // libunftp samples PASV ports from a CLOSED interval `[start, end]`
+        // (its pasv.rs computes `end - start + 1`), while ftp-toolbox speaks
+        // half-open `start..end` everywhere (UI label, conflict detection,
+        // tests). Tighten the upper bound by one so libunftp never hands out
+        // the exclusive `end` port — otherwise a `1/len` chance of transfers
+        // failing and the passive-ports integration test going flaky.
+        let pasv = self.passive_ports.start..self.passive_ports.end.saturating_sub(1);
         let mut builder = Server::with_fs(self.root.clone())
             .greeting(GREETING)
-            .passive_ports(self.passive_ports.clone());
+            .passive_ports(pasv);
         if let Some(auth) = &self.auth {
             builder = builder
                 .authenticator(Arc::clone(auth) as Arc<dyn Authenticator<DefaultUser> + Send + Sync>);

@@ -1,7 +1,7 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
   "productName": "ftp-toolbox",
-  "version": "0.2.5",
+  "version": "0.2.6",
   "identifier": "com.workbuddy.ftptoolbox",
   "build": {
     "frontendDist": "../ui/dist",
@@ -10,7 +10,7 @@
     "beforeBuildCommand": { "script": "npm run build", "cwd": "../ui" }
   },
   "app": {
-    "withGlobalTauri": true,
+    "withGlobalTauri": false,
     "windows": [
       {
         "title": "FTP/TFTP 工具箱",
@@ -21,7 +21,7 @@
       }
     ],
     "security": {
-      "csp": null
+      "csp": "default-src 'self'; img-src 'self' asset: data:; style-src 'self' 'unsafe-inline'"
     }
   },
   "bundle": {

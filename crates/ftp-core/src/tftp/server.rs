@@ -11,7 +11,7 @@ use tokio::task::JoinHandle;
 use tracing::{error, info, warn};
 
 use super::packet::{negotiated_blksize, Packet};
-use super::{BLOCK_SIZE, MAX_RETRIES, TIMEOUT};
+use super::{BLOCK_SIZE, MAX_RETRIES, MAX_UPLOAD_BYTES, TIMEOUT};
 use crate::error::{Error, Result};
 use crate::lifecycle::{ServerShared, ServerState};
 
@@ -315,8 +315,19 @@ async fn recv_file(
         block = block.wrapping_add(1);
         let data = await_data(sock, block, &last_reply, blksize).await?;
         let done = data.len() < blksize;
-        file.write_all(&data).await?;
         total += data.len() as u64;
+        // tsize is not negotiated, so this is the only way to keep a peer
+        // from filling the disk: abort past the cumulative cap. TFTP error
+        // code 3 ("Disk full or allocation exceeded") is the closest fit.
+        if total > MAX_UPLOAD_BYTES {
+            send_error(sock, 3, "Upload exceeds the 4 GiB limit").await;
+            drop(file); // release the handle first — Windows refuses to delete open files
+            let _ = tokio::fs::remove_file(&path).await; // the partial file is garbage
+            return Err(Error::TftpProtocol(format!(
+                "WRQ aborted: {name} 超过单次上传上限 {MAX_UPLOAD_BYTES} 字节"
+            )));
+        }
+        file.write_all(&data).await?;
         last_reply = Packet::Ack { block }.encode();
         sock.send(&last_reply).await?;
         if done {

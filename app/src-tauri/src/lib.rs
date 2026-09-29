@@ -451,8 +451,12 @@ struct PassivePortCheck {
 }
 
 #[tauri::command]
-fn check_passive_ports(start: u16, end: u16) -> PassivePortCheck {
-    let bands = excluded_tcp_ranges();
+async fn check_passive_ports(start: u16, end: u16) -> PassivePortCheck {
+    // netsh 实测 50-300ms，而本命令由被动端口输入框 250ms 防抖触发 —— 非 async
+    // 命令在主线程执行，每次停顿输入都会冻住 UI 一个 netsh 周期。挪到阻塞线程池。
+    let bands = tauri::async_runtime::spawn_blocking(excluded_tcp_ranges)
+        .await
+        .unwrap_or_default();
     let (lo, hi) = if start <= end { (start, end) } else { (end, start) };
     let ports = lo..hi.saturating_add(1);
     let conflicts = passive::conflicts(&ports, &bands);
@@ -552,20 +556,31 @@ fn log_firewall_hint(_label: &str, _listen_addr: &str) {}
 // ---------- FTPS certificate ----------
 
 #[tauri::command]
-fn ftps_cert_info(app: AppHandle) -> CmdResult<tls::CertInfo> {
-    let (cert, key) = ftps_cert_paths(&app)?;
-    tls::load_or_generate(&cert, &key).map_err(err)
+async fn ftps_cert_info(app: AppHandle) -> CmdResult<tls::CertInfo> {
+    // 首次调用会生成 ECDSA 密钥对并写盘，属秒级阻塞操作 —— 放阻塞线程池，
+    // 不卡主线程。
+    tauri::async_runtime::spawn_blocking(move || {
+        let (cert, key) = ftps_cert_paths(&app)?;
+        tls::load_or_generate(&cert, &key).map_err(err)
+    })
+    .await
+    .map_err(|e| format!("后台任务失败: {e}"))?
 }
 
 /// Regenerate the self-signed pair: the fingerprint changes, which is exactly
 /// the point — peers who pinned it will notice, and that should be loud.
 #[tauri::command]
-fn ftps_regenerate_cert(app: AppHandle) -> CmdResult<tls::CertInfo> {
-    let (cert, key) = ftps_cert_paths(&app)?;
-    for path in [&cert, &key] {
-        let _ = std::fs::remove_file(path);
-    }
-    tls::generate_self_signed(&cert, &key).map_err(err)
+async fn ftps_regenerate_cert(app: AppHandle) -> CmdResult<tls::CertInfo> {
+    // 同 ftps_cert_info：密钥生成是 CPU/IO 密集操作，不放主线程。
+    tauri::async_runtime::spawn_blocking(move || {
+        let (cert, key) = ftps_cert_paths(&app)?;
+        for path in [&cert, &key] {
+            let _ = std::fs::remove_file(path);
+        }
+        tls::generate_self_signed(&cert, &key).map_err(err)
+    })
+    .await
+    .map_err(|e| format!("后台任务失败: {e}"))?
 }
 
 // ---------- FTP client ----------

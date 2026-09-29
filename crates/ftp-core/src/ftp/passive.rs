@@ -1,5 +1,10 @@
 //! Passive-mode (PASV/EPSV) data port helpers.
 //!
+//! This module (and all of ftp-toolbox) speaks half-open `start..end`.
+//! libunftp itself samples from a CLOSED `[start, end]`, so `server.rs`
+//! tightens the upper bound by one right before handing the range over —
+//! here we only ever deal with the half-open form.
+//!
 //! libunftp picks a random port out of a configured range and retries a few
 //! times, so a band that *partially* overlaps an OS-reserved range fails
 //! roughly proportionally to the overlap. Nothing about that failure is visible

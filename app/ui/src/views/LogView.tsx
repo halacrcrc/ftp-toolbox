@@ -23,8 +23,8 @@ export default function LogView({ logs, onClear }: Props) {
       </div>
       <div className="log-list">
         {logs.length === 0 && <div className="log-empty">暂无日志</div>}
-        {logs.map((l, i) => (
-          <div key={i} className={`log-line ${l.level}`}>
+        {logs.map((l) => (
+          <div key={l.id} className={`log-line ${l.level}`}>
             <span className="log-time">{l.time}</span>
             <span>{l.text}</span>
           </div>

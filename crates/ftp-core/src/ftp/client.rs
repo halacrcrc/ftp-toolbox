@@ -1,4 +1,4 @@
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::pin::Pin;
 use std::task::{Context, Poll};
 
@@ -135,39 +135,62 @@ impl FtpClient {
             },
         );
 
-        let mut data = self.stream.retr_as_stream(remote).await?;
-        let mut out = File::create(local).await?;
-        let mut buf = vec![0u8; 64 * 1024];
-        let mut received: u64 = 0;
-        loop {
-            let n = data.read(&mut buf).await?;
-            if n == 0 {
-                break;
+        // Write to `<local>.part` and rename into place only after a clean
+        // finish: an aborted transfer must not leave a half-written file at
+        // the destination pretending to be complete. Any failure inside the
+        // block removes the leftover.
+        let mut part_os = local.as_os_str().to_os_string();
+        part_os.push(".part");
+        let part = PathBuf::from(part_os);
+        let written = async {
+            let mut data = self.stream.retr_as_stream(remote).await?;
+            let mut out = File::create(&part).await?;
+            let mut buf = vec![0u8; 64 * 1024];
+            let mut received: u64 = 0;
+            loop {
+                let n = data.read(&mut buf).await?;
+                if n == 0 {
+                    break;
+                }
+                out.write_all(&buf[..n]).await?;
+                received += n as u64;
+                TransferEvent::emit(
+                    &progress,
+                    TransferEvent::Progress {
+                        kind: TransferKind::Download,
+                        file: name.clone(),
+                        bytes: received,
+                        total,
+                    },
+                );
             }
-            out.write_all(&buf[..n]).await?;
-            received += n as u64;
-            TransferEvent::emit(
-                &progress,
-                TransferEvent::Progress {
-                    kind: TransferKind::Download,
-                    file: name.clone(),
-                    bytes: received,
-                    total,
-                },
-            );
+            out.flush().await?;
+            self.stream.finalize_retr_stream(data).await?;
+            Ok::<u64, Error>(received)
         }
-        out.flush().await?;
-        self.stream.finalize_retr_stream(data).await?;
+        .await;
 
-        TransferEvent::emit(
-            &progress,
-            TransferEvent::Done {
-                kind: TransferKind::Download,
-                file: name,
-                bytes: received,
-            },
-        );
-        Ok(())
+        match written {
+            Ok(received) => {
+                if let Err(e) = tokio::fs::rename(&part, local).await {
+                    let _ = tokio::fs::remove_file(&part).await;
+                    return Err(e.into());
+                }
+                TransferEvent::emit(
+                    &progress,
+                    TransferEvent::Done {
+                        kind: TransferKind::Download,
+                        file: name,
+                        bytes: received,
+                    },
+                );
+                Ok(())
+            }
+            Err(e) => {
+                let _ = tokio::fs::remove_file(&part).await;
+                Err(e)
+            }
+        }
     }
 
     pub async fn quit(mut self) -> Result<()> {

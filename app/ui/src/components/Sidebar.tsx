@@ -1,3 +1,5 @@
+import iconUrl from "../assets/icon.png";
+
 export type ViewKey = "servers" | "ftp" | "tftp" | "logs";
 
 interface Props {
@@ -52,10 +54,10 @@ export default function Sidebar({ active, onNavigate }: Props) {
   return (
     <aside className="sidebar">
       <div className="brand">
+        {/* 品牌标直接用打包图标本身（icons/icon.ico 的 128px 帧），
+            保证侧栏里的图标和 exe / 安装包永远长得一样 */}
         <span className="brand-mark">
-          <svg viewBox="0 0 20 20" width="18" height="18" fill="none" stroke="#fff" strokeWidth="1.8">
-            <path d="M6 3v10m0 0-3-3m3 3 3-3M14 17V7m0 0 3 3m-3-3-3 3" strokeLinecap="round" strokeLinejoin="round" />
-          </svg>
+          <img src={iconUrl} alt="FTP 工具箱" width={30} height={30} />
         </span>
         <span className="brand-name">FTP 工具箱</span>
       </div>

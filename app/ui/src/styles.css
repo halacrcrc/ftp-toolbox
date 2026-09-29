@@ -65,10 +65,15 @@ button {
 .brand-mark {
   width: 30px;
   height: 30px;
-  border-radius: 8px;
-  background: var(--accent);
-  display: grid;
-  place-items: center;
+  flex-shrink: 0;
+}
+
+.brand-mark img {
+  display: block;
+  width: 100%;
+  height: 100%;
+  /* 图标帧自带圆角与紫底，这里只加一点投影让它在浅色侧栏上立得住 */
+  filter: drop-shadow(0 1px 2px rgba(15, 23, 42, 0.18));
 }
 
 .brand-name {

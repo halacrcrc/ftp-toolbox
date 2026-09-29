@@ -3,26 +3,61 @@ use std::pin::Pin;
 use std::task::{Context, Poll};
 
 use futures::io::AsyncReadExt;
-use suppaftp::AsyncFtpStream;
+use suppaftp::{AsyncNativeTlsConnector, AsyncNativeTlsFtpStream};
 use tokio::fs::File;
 use tokio::io::AsyncWriteExt;
 use tokio_util::compat::TokioAsyncReadCompatExt;
 
-use crate::error::Result;
+use crate::error::{Error, Result};
 use crate::progress::{ProgressTx, TransferEvent, TransferKind};
+
+/// TLS mode for an outgoing FTP connection.
+///
+/// Only **explicit** FTPS (`AUTH TLS` on the control channel, then `PBSZ`/`PROT P`
+/// for data) is offered — implicit FTPS on port 990 is deprecated and rare.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum FtpsMode {
+    /// Plain FTP, no TLS (the historical behaviour).
+    #[default]
+    Plain,
+    /// Upgrade to TLS right after connecting, before sending credentials.
+    ///
+    /// `accept_invalid_certs` lets self-signed / untrusted certificates
+    /// through — necessary for our own auto-generated server certificate.
+    /// The UI should say plainly that this disables server verification.
+    Explicit { accept_invalid_certs: bool },
+}
 
 /// Thin async wrapper over suppaftp with progress reporting.
 ///
 /// Note: suppaftp's async API is built on futures-io traits, so tokio
 /// readers/streams are bridged with tokio-util's compat layer.
+///
+/// The stream type is `AsyncNativeTlsFtpStream` in *both* modes: the type
+/// parameter is only a marker, and data-channel encryption is decided by
+/// whether `into_secure` actually ran (`tls_ctx` set → `PROT P`). Plain mode
+/// therefore behaves exactly like the historical no-TLS client.
 pub struct FtpClient {
-    stream: AsyncFtpStream,
+    stream: AsyncNativeTlsFtpStream,
 }
 
 impl FtpClient {
     /// Connect and log in. Use ("anonymous", "") for anonymous servers.
     pub async fn connect(addr: &str, user: &str, pass: &str) -> Result<Self> {
-        let mut stream = AsyncFtpStream::connect(addr).await?;
+        Self::connect_ext(addr, user, pass, FtpsMode::Plain).await
+    }
+
+    /// [`connect`] with a TLS mode.
+    ///
+    /// TLS is negotiated *before* `USER`/`PASS` go out, so credentials never
+    /// travel in cleartext on an FTPS connection.
+    pub async fn connect_ext(addr: &str, user: &str, pass: &str, tls: FtpsMode) -> Result<Self> {
+        let mut stream = AsyncNativeTlsFtpStream::connect(addr).await?;
+        if let FtpsMode::Explicit { accept_invalid_certs } = tls {
+            stream = stream
+                .into_secure(tls_connector(accept_invalid_certs)?, tls_host(addr)?)
+                .await?;
+        }
         stream.login(user, pass).await?;
         Ok(Self { stream })
     }
@@ -138,6 +173,38 @@ impl FtpClient {
     pub async fn quit(mut self) -> Result<()> {
         Ok(self.stream.quit().await?)
     }
+}
+
+/// Build the TLS connector handed to `into_secure`.
+///
+/// `accept_invalid_certs` is what makes our own self-signed server usable:
+/// such a certificate fails both the trust-chain and the hostname check.
+fn tls_connector(accept_invalid_certs: bool) -> Result<AsyncNativeTlsConnector> {
+    let mut builder = native_tls::TlsConnector::builder();
+    if accept_invalid_certs {
+        builder.danger_accept_invalid_certs(true);
+        builder.danger_accept_invalid_hostnames(true);
+    }
+    // Two hops: the builder converts into async_native_tls's own TlsConnector
+    // (impl From<TlsConnectorBuilder>), which then converts into suppaftp's
+    // wrapper (impl From<async_native_tls::TlsConnector>).
+    Ok(AsyncNativeTlsConnector::from(
+        suppaftp::async_native_tls::TlsConnector::from(builder),
+    ))
+}
+
+/// Hostname part of `host:port` (brackets stripped for IPv6 literals) — the
+/// name used for SNI and certificate verification during the handshake.
+fn tls_host(addr: &str) -> Result<&str> {
+    let host = match addr.rsplit_once(':') {
+        Some((h, _)) => h,
+        None => addr,
+    };
+    let host = host.trim_matches(|c| c == '[' || c == ']');
+    if host.is_empty() {
+        return Err(Error::Config(format!("无法从地址中解析主机名: {addr}")));
+    }
+    Ok(host)
 }
 
 /// futures-io AsyncRead wrapper that counts bytes and emits progress events.

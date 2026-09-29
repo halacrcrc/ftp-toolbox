@@ -1,6 +1,6 @@
 [package]
 name = "ftp-toolbox-app"
-version = "0.2.3"
+version = "0.2.5"
 edition.workspace = true
 license.workspace = true
 description = "FTP/TFTP toolbox desktop app (Tauri shell over ftp-core)"

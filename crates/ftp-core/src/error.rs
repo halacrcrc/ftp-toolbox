@@ -17,6 +17,11 @@ pub enum Error {
     #[error("ftp error: {0}")]
     Ftp(#[from] suppaftp::FtpError),
 
+    /// TLS failure: certificate generation, PEM parsing or the TLS handshake
+    /// itself. Messages are user-facing (they name the offending file).
+    #[error("{0}")]
+    Tls(String),
+
     /// FTP server failed to build or start (bad root dir, invalid config).
     #[error("ftp server error: {0}")]
     FtpServer(String),

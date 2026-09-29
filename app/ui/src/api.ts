@@ -9,7 +9,7 @@
  */
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
-import { open } from "@tauri-apps/plugin-dialog";
+import { open, save } from "@tauri-apps/plugin-dialog";
 
 export type TransferKind = "upload" | "download";
 
@@ -67,6 +67,14 @@ export interface PassivePortCheck {
   reservedCount: number;
 }
 
+/** FTPS 自签证书信息。指纹变了 = 身份变了，对端会重新校验。 */
+export interface CertInfo {
+  /** SHA-256 指纹，冒号分隔的大写十六进制（OpenSSH 风格）。 */
+  fingerprint: string;
+  certPath: string;
+  keyPath: string;
+}
+
 /** Backend tracing event forwarded over "backend-log". */
 export interface BackendLog {
   level: "TRACE" | "DEBUG" | "INFO" | "WARN" | "ERROR";
@@ -80,7 +88,8 @@ export const api = {
     addr: string,
     user?: string,
     pass?: string,
-    passivePorts?: string
+    passivePorts?: string,
+    ftps?: boolean
   ) =>
     invoke<string>("start_ftp_server", {
       root,
@@ -88,6 +97,7 @@ export const api = {
       user: user && user.length > 0 ? user : null,
       pass: pass ?? null,
       passivePorts: passivePorts && passivePorts.length > 0 ? passivePorts : null,
+      ftpsEnabled: ftps ?? false,
     }),
   stopFtpServer: () => invoke<string>("stop_ftp_server"),
   ftpServerStatus: () => invoke<ServerStatus>("ftp_server_status"),
@@ -99,8 +109,25 @@ export const api = {
   checkPassivePorts: (start: number, end: number) =>
     invoke<PassivePortCheck>("check_passive_ports", { start, end }),
 
-  ftpConnect: (addr: string, user: string, pass: string) =>
-    invoke<string>("ftp_connect", { addr, user, pass }),
+  /** 当前自签证书信息（首次调用会生成证书文件）。 */
+  ftpsCertInfo: () => invoke<CertInfo>("ftps_cert_info"),
+  /** 重新生成自签证书：指纹会变，已校验过旧指纹的对端会察觉。 */
+  ftpsRegenerateCert: () => invoke<CertInfo>("ftps_regenerate_cert"),
+
+  ftpConnect: (
+    addr: string,
+    user: string,
+    pass: string,
+    ftps?: boolean,
+    acceptInvalidCerts?: boolean
+  ) =>
+    invoke<string>("ftp_connect", {
+      addr,
+      user,
+      pass,
+      ftps: ftps ?? false,
+      acceptInvalidCerts: acceptInvalidCerts ?? false,
+    }),
   ftpDisconnect: () => invoke<string>("ftp_disconnect"),
   ftpList: (path?: string) => invoke<string[]>("ftp_list", { path: path ?? null }),
   ftpUpload: (local: string, remote: string) =>
@@ -120,6 +147,30 @@ export const api = {
 export async function pickFolder(defaultPath?: string): Promise<string | null> {
   const selected = await open({ directory: true, multiple: false, defaultPath });
   return typeof selected === "string" ? selected : null;
+}
+
+/** Open the native Windows file picker (existing file); null when cancelled. */
+export async function pickFile(defaultPath?: string): Promise<string | null> {
+  const selected = await open({ directory: false, multiple: false, defaultPath });
+  return typeof selected === "string" ? selected : null;
+}
+
+/** Open the native Windows "save as" dialog; null when cancelled. */
+export async function pickSaveFile(defaultPath?: string): Promise<string | null> {
+  const selected = await save({ defaultPath });
+  return typeof selected === "string" ? selected : null;
+}
+
+/** Directory part of a Windows/POSIX path, with the trailing separator kept. */
+export function pathDir(p: string): string {
+  const i = Math.max(p.lastIndexOf("\\"), p.lastIndexOf("/"));
+  return i > 0 ? p.slice(0, i + 1) : "";
+}
+
+/** Final segment of a Windows/POSIX path. */
+export function pathBase(p: string): string {
+  const i = Math.max(p.lastIndexOf("\\"), p.lastIndexOf("/"));
+  return i >= 0 ? p.slice(i + 1) : p;
 }
 
 export function onTransferProgress(cb: (ev: TransferEvent) => void) {

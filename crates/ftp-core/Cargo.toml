@@ -1,6 +1,6 @@
 [package]
 name = "ftp-core"
-version = "0.2.3"
+version = "0.2.5"
 edition.workspace = true
 license.workspace = true
 description = "Pure-tokio FTP/TFTP server & client engine, GUI-agnostic"
@@ -16,3 +16,10 @@ async-trait = "0.1"
 libunftp = "0.20"
 unftp-sbe-fs = "0.2"
 suppaftp = { version = "6", features = ["async-native-tls"] }
+native-tls = "0.2"
+# ring's build script needs to spawn a C compiler, which the sandboxed dev
+# environment refuses; aws_lc_rs shares the provider rustls already builds.
+rcgen = { version = "0.13", default-features = false, features = ["pem", "aws_lc_rs"] }
+sha2 = "0.10"
+base64 = "0.22"
+time = "0.3"

@@ -1,5 +1,6 @@
 import { useState } from "react";
-import { api } from "../api";
+import { api, pathBase } from "../api";
+import LocalFileField from "../components/LocalFileField";
 import { LogEntry } from "../App";
 
 type Log = (text: string, level?: LogEntry["level"]) => void;
@@ -14,11 +15,15 @@ export default function FtpClientView({ log }: { log: Log }) {
   const [listing, setListing] = useState<string[] | null>(null);
   const [local, setLocal] = useState("C:\\ftp-root\\hello.txt");
   const [remote, setRemote] = useState("hello.txt");
+  // FTPS（显式 TLS）：连上后先 AUTH TLS 再发账号密码，凭据不走明文。
+  // 自签服务器（包括本应用自己）需要勾「接受无效证书」。
+  const [ftps, setFtps] = useState(false);
+  const [acceptInvalidCerts, setAcceptInvalidCerts] = useState(false);
 
   const connect = async () => {
     setBusy(true);
     try {
-      const msg = await api.ftpConnect(addr, user, pass);
+      const msg = await api.ftpConnect(addr, user, pass, ftps, acceptInvalidCerts);
       log(msg, "ok");
       setConnected(true);
     } catch (e) {
@@ -90,6 +95,34 @@ export default function FtpClientView({ log }: { log: Log }) {
             />
           </label>
         </div>
+        <div className="radio-row">
+          <label className="radio">
+            <input
+              type="checkbox"
+              checked={ftps}
+              onChange={(e) => setFtps(e.target.checked)}
+              disabled={connected}
+            />
+            FTPS（显式 TLS）
+          </label>
+          {ftps && (
+            <label className="radio">
+              <input
+                type="checkbox"
+                checked={acceptInvalidCerts}
+                onChange={(e) => setAcceptInvalidCerts(e.target.checked)}
+                disabled={connected}
+              />
+              接受自签/无效证书
+            </label>
+          )}
+        </div>
+        {ftps && acceptInvalidCerts && (
+          <div className="hint-line warn">
+            ⚠ 勾选「接受自签/无效证书」后将不校验服务器身份，连接可能被中间人冒充；
+            只建议在自测或信任的局域网内使用。对端证书指纹可在服务器页面查看。
+          </div>
+        )}
         <div className="actions">
           {connected ? (
             <button className="btn" onClick={disconnect} disabled={busy}>
@@ -126,10 +159,14 @@ export default function FtpClientView({ log }: { log: Log }) {
 
       <div className="card">
         <div className="card-title">文件传输</div>
-        <label className="field">
-          <span>本地文件</span>
-          <input value={local} onChange={(e) => setLocal(e.target.value)} disabled={!connected} />
-        </label>
+        <LocalFileField
+          value={local}
+          onChange={setLocal}
+          onPicked={(p) => setRemote(pathBase(p))}
+          saveName={remote}
+          disabled={!connected}
+          log={log}
+        />
         <label className="field">
           <span>远程文件名</span>
           <input value={remote} onChange={(e) => setRemote(e.target.value)} disabled={!connected} />

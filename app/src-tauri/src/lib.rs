@@ -8,11 +8,11 @@ use std::path::PathBuf;
 use std::sync::Mutex;
 
 use ftp_core::ftp::passive;
-use ftp_core::ftp::{FtpAuth, FtpClient, FtpServerHandle, FtpServerOptions};
+use ftp_core::ftp::{FtpsMode, FtpAuth, FtpClient, FtpServerHandle, FtpServerOptions};
 use ftp_core::lifecycle::ServerState;
 use ftp_core::tftp::TftpServerHandle;
-use ftp_core::ProgressTx;
-use tauri::{AppHandle, Emitter, State};
+use ftp_core::{tls, ProgressTx};
+use tauri::{AppHandle, Emitter, Manager, State};
 use tokio::sync::{watch, Mutex as AsyncMutex};
 
 #[derive(Default)]
@@ -47,6 +47,20 @@ fn progress_forwarder(app: &AppHandle) -> ProgressTx {
 
 // ---------- FTP server ----------
 
+/// Where the FTPS certificate pair lives: `<app-data>/certs/{cert,key}.pem`.
+///
+/// App-data survives reinstalls and is per-user, so the fingerprint shown in
+/// the UI stays stable across updates — regenerating it silently would be
+/// exactly the identity change the fingerprint exists to make visible.
+fn ftps_cert_paths(app: &AppHandle) -> CmdResult<(PathBuf, PathBuf)> {
+    let dir = app
+        .path()
+        .app_data_dir()
+        .map_err(err)?
+        .join("certs");
+    Ok((dir.join("cert.pem"), dir.join("key.pem")))
+}
+
 #[tauri::command]
 async fn start_ftp_server(
     app: AppHandle,
@@ -56,6 +70,7 @@ async fn start_ftp_server(
     user: Option<String>,
     pass: Option<String>,
     passive_ports: Option<String>,
+    ftps_enabled: Option<bool>,
 ) -> CmdResult<String> {
     // Guard first: starting a second instance on the same port only produces an
     // "address already in use" bind failure — and the old handle is dropped
@@ -78,8 +93,28 @@ async fn start_ftp_server(
         FtpAuth::Anonymous => "匿名",
         FtpAuth::Users(_) => "账号认证",
     };
+    // FTPS: make sure a self-signed pair exists (first run generates it, a
+    // corrupted one self-heals) *before* the server is built — the engine
+    // validates the files again pre-bind, but generating here keeps the
+    // fingerprint visible in the returned message.
+    let ftps_on = ftps_enabled.unwrap_or(false);
+    let mut ftps_note = String::new();
     let options = FtpServerOptions {
         passive_ports: passive::parse(passive_ports.as_deref().unwrap_or("")).map_err(err)?,
+        ftps: None,
+    };
+    let options = if ftps_on {
+        let (cert_path, key_path) = ftps_cert_paths(&app)?;
+        let info = tls::load_or_generate(&cert_path, &key_path).map_err(err)?;
+        ftps_note = format!("，FTPS 已启用（证书指纹 {}）", info.fingerprint);
+        tracing::info!(fingerprint = %info.fingerprint, cert = %info.cert_path, "FTPS 证书就绪");
+        FtpServerOptions { ftps: Some(ftp_core::ftp::FtpsOptions {
+            certs_file: PathBuf::from(info.cert_path),
+            key_file: PathBuf::from(info.key_path),
+            required: false, // optional TLS: plain clients stay welcome
+        }), ..options }
+    } else {
+        options
     };
 
     // The socket is bound inside this call, so "port in use" comes back as a
@@ -137,7 +172,7 @@ async fn start_ftp_server(
         ));
     }
     Ok(format!(
-        "FTP 服务器已启动：监听 {detail}（{mode}，被动端口 {passive}）{note}"
+        "FTP 服务器已启动：监听 {detail}（{mode}，被动端口 {passive}）{ftps_note}{note}"
     ))
 }
 
@@ -514,6 +549,25 @@ fn log_firewall_hint(label: &str, listen_addr: &str) {
 #[cfg(not(windows))]
 fn log_firewall_hint(_label: &str, _listen_addr: &str) {}
 
+// ---------- FTPS certificate ----------
+
+#[tauri::command]
+fn ftps_cert_info(app: AppHandle) -> CmdResult<tls::CertInfo> {
+    let (cert, key) = ftps_cert_paths(&app)?;
+    tls::load_or_generate(&cert, &key).map_err(err)
+}
+
+/// Regenerate the self-signed pair: the fingerprint changes, which is exactly
+/// the point — peers who pinned it will notice, and that should be loud.
+#[tauri::command]
+fn ftps_regenerate_cert(app: AppHandle) -> CmdResult<tls::CertInfo> {
+    let (cert, key) = ftps_cert_paths(&app)?;
+    for path in [&cert, &key] {
+        let _ = std::fs::remove_file(path);
+    }
+    tls::generate_self_signed(&cert, &key).map_err(err)
+}
+
 // ---------- FTP client ----------
 
 #[tauri::command]
@@ -522,13 +576,26 @@ async fn ftp_connect(
     addr: String,
     user: String,
     pass: String,
+    ftps: Option<bool>,
+    accept_invalid_certs: Option<bool>,
 ) -> CmdResult<String> {
-    let client = FtpClient::connect(&addr, &user, &pass).await.map_err(err)?;
+    let mode = match ftps.unwrap_or(false) {
+        false => FtpsMode::Plain,
+        true => FtpsMode::Explicit { accept_invalid_certs: accept_invalid_certs.unwrap_or(false) },
+    };
+    let client = FtpClient::connect_ext(&addr, &user, &pass, mode).await.map_err(err)?;
     let mut guard = state.ftp_client.lock().await;
     if let Some(old) = guard.replace(client) {
         let _ = old.quit().await;
     }
-    Ok(format!("已连接 {addr}"))
+    let tls_label = match mode {
+        FtpsMode::Plain => String::new(),
+        FtpsMode::Explicit { accept_invalid_certs } if accept_invalid_certs => {
+            "，FTPS（未校验证书）".into()
+        }
+        FtpsMode::Explicit { .. } => "，FTPS".into(),
+    };
+    Ok(format!("已连接 {addr}{tls_label}"))
 }
 
 #[tauri::command]
@@ -852,6 +919,8 @@ pub fn run() {
             stop_tftp_server,
             tftp_server_status,
             check_passive_ports,
+            ftps_cert_info,
+            ftps_regenerate_cert,
             ftp_connect,
             ftp_disconnect,
             ftp_list,

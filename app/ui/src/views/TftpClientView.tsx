@@ -1,5 +1,6 @@
 import { useState } from "react";
-import { api } from "../api";
+import { api, pathBase } from "../api";
+import LocalFileField from "../components/LocalFileField";
 import { LogEntry } from "../App";
 
 type Log = (text: string, level?: LogEntry["level"]) => void;
@@ -33,10 +34,13 @@ export default function TftpClientView({ log }: { log: Log }) {
         <span>服务器地址</span>
         <input value={server} onChange={(e) => setServer(e.target.value)} />
       </label>
-      <label className="field">
-        <span>本地文件</span>
-        <input value={local} onChange={(e) => setLocal(e.target.value)} />
-      </label>
+      <LocalFileField
+        value={local}
+        onChange={setLocal}
+        onPicked={(p) => setRemote(pathBase(p))}
+        saveName={remote}
+        log={log}
+      />
       <label className="field">
         <span>远程文件名</span>
         <input value={remote} onChange={(e) => setRemote(e.target.value)} />

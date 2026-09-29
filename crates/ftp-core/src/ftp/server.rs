@@ -5,6 +5,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use libunftp::auth::{AuthenticationError, Authenticator, Credentials, DefaultUser};
+use libunftp::options::FtpsRequired;
 use libunftp::Server;
 use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::{broadcast, watch};
@@ -18,6 +19,18 @@ use crate::lifecycle::{ServerShared, ServerState, SessionGuard};
 
 const GREETING: &str = "Welcome to ftp-toolbox";
 
+/// FTPS (explicit TLS, `AUTH TLS`) server-side configuration.
+///
+/// Both files are PEM; [`crate::tls::generate_self_signed`] produces exactly
+/// this pair. `required` decides whether a client that refuses TLS can still
+/// log in (`FtpsRequired::All` on control *and* data channels when true).
+#[derive(Debug, Clone)]
+pub struct FtpsOptions {
+    pub certs_file: PathBuf,
+    pub key_file: PathBuf,
+    pub required: bool,
+}
+
 /// Server knobs that the GUI exposes. `Default` reproduces the historical
 /// behaviour, so callers that do not care keep working unchanged.
 #[derive(Debug, Clone)]
@@ -29,11 +42,13 @@ pub struct FtpServerOptions {
     /// default band can overlap a Hyper-V/WSL2 reserved block, which makes PASV
     /// fail intermittently with nothing useful in the log.
     pub passive_ports: Range<u16>,
+    /// `Some` enables FTPS; `None` keeps the server plain FTP.
+    pub ftps: Option<FtpsOptions>,
 }
 
 impl Default for FtpServerOptions {
     fn default() -> Self {
-        Self { passive_ports: DEFAULT_PASSIVE_PORTS }
+        Self { passive_ports: DEFAULT_PASSIVE_PORTS, ftps: None }
     }
 }
 
@@ -95,18 +110,27 @@ struct ServerConfig {
     /// `None` means anonymous access.
     auth: Option<Arc<StaticAuth>>,
     passive_ports: Range<u16>,
+    /// `Some` enables explicit FTPS (`AUTH TLS`), handled inside libunftp.
+    ftps: Option<Arc<FtpsOptions>>,
 }
 
 impl ServerConfig {
     fn build(&self) -> std::result::Result<Server<Filesystem, DefaultUser>, Error> {
-        let builder = Server::with_fs(self.root.clone())
+        let mut builder = Server::with_fs(self.root.clone())
             .greeting(GREETING)
             .passive_ports(self.passive_ports.clone());
-        let builder = match &self.auth {
-            Some(auth) => builder
-                .authenticator(Arc::clone(auth) as Arc<dyn Authenticator<DefaultUser> + Send + Sync>),
-            None => builder,
-        };
+        if let Some(auth) = &self.auth {
+            builder = builder
+                .authenticator(Arc::clone(auth) as Arc<dyn Authenticator<DefaultUser> + Send + Sync>);
+        }
+        if let Some(ftps) = &self.ftps {
+            builder = builder.ftps(&ftps.certs_file, &ftps.key_file);
+            if ftps.required {
+                // Both channels: a client that skips TLS gets neither login
+                // nor data transfers.
+                builder = builder.ftps_required(FtpsRequired::All, FtpsRequired::All);
+            }
+        }
         builder.build().map_err(|e| Error::FtpServer(error_chain(&e)))
     }
 }
@@ -131,6 +155,8 @@ pub struct FtpServerHandle {
     pub root: PathBuf,
     /// Passive port range in effect (half-open).
     pub passive_ports: Range<u16>,
+    /// Whether explicit FTPS was enabled for this run.
+    pub ftps_enabled: bool,
 }
 
 impl FtpServerHandle {
@@ -204,6 +230,25 @@ pub async fn start_server_with(
         )));
     }
 
+    // Fail *before* binding when the TLS material is unusable: an FTPS server
+    // without its cert pair is a config error, not a runtime surprise.
+    if let Some(ftps) = &options.ftps {
+        for (label, path) in [("证书", &ftps.certs_file), ("私钥", &ftps.key_file)] {
+            if !path.is_file() {
+                return Err(Error::Tls(format!(
+                    "启用 FTPS 需要{}文件，但不存在: {}",
+                    label,
+                    path.display()
+                )));
+            }
+        }
+        info!(
+            certs = %ftps.certs_file.display(),
+            required = ftps.required,
+            "ftps enabled: clients may upgrade with AUTH TLS"
+        );
+    }
+
     let addr: SocketAddr = bind
         .parse()
         .map_err(|e| Error::FtpServer(format!("监听地址无法解析「{bind}」: {e}")))?;
@@ -213,6 +258,7 @@ pub async fn start_server_with(
         .local_addr()
         .map(|a| a.to_string())
         .unwrap_or_else(|_| bind.clone());
+    let passive_label = options.passive_ports_label();
 
     let cfg = Arc::new(ServerConfig {
         root: root.clone(),
@@ -221,11 +267,11 @@ pub async fn start_server_with(
             FtpAuth::Users(users) => Some(Arc::new(StaticAuth { users })),
         },
         passive_ports: options.passive_ports.clone(),
+        ftps: options.ftps.map(Arc::new),
     });
 
     let shared = ServerShared::new("ftp");
     let (stop_tx, _) = broadcast::channel::<()>(1);
-    let passive_label = options.passive_ports_label();
 
     let join = tokio::spawn({
         let shared = Arc::clone(&shared);
@@ -276,6 +322,7 @@ pub async fn start_server_with(
         local_addr,
         root,
         passive_ports: options.passive_ports,
+        ftps_enabled: cfg.ftps.is_some(),
     })
 }
 

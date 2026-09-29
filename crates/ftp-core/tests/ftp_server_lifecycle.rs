@@ -207,7 +207,7 @@ async fn custom_passive_ports_are_used_for_pasv() {
         root_dir("pasv-range"),
         "127.0.0.1:0".into(),
         FtpAuth::Anonymous,
-        FtpServerOptions { passive_ports: ports.clone() },
+        FtpServerOptions { passive_ports: ports.clone(), ..Default::default() },
     )
     .await
     .unwrap();

@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from "react";
-import { api, pickFolder, NetInterface, PassivePortCheck, ServerStatus } from "../api";
+import { api, pickFolder, CertInfo, NetInterface, PassivePortCheck, ServerStatus } from "../api";
 import { LogEntry } from "../App";
 
 type Log = (text: string, level?: LogEntry["level"]) => void;
@@ -14,6 +14,8 @@ interface ServerPrefs {
   user: string;
   /** 被动数据端口段，界面写法是闭区间："50000-50099" */
   passive: string;
+  /** 启用 FTPS（显式 TLS；明文客户端仍可连 —— 服务端是可选 TLS）。 */
+  ftps: boolean;
 }
 
 function loadPrefs(key: string, fallback: ServerPrefs): ServerPrefs {
@@ -69,6 +71,8 @@ interface ServerCardProps {
   /** 是否暴露被动数据端口段（只有 FTP 需要）。 */
   withPassive?: boolean;
   defaultPassive?: string;
+  /** 是否暴露 FTPS（显式 TLS）开关与证书指纹（只有 FTP 需要）。 */
+  withFtps?: boolean;
   interfaces: NetInterface[];
   /** 网卡列表是否已成功读到过 —— 与「列表是不是空的」是两件事。 */
   interfacesLoaded: boolean;
@@ -79,7 +83,8 @@ interface ServerCardProps {
     addr: string,
     user?: string,
     pass?: string,
-    passivePorts?: string
+    passivePorts?: string,
+    ftps?: boolean
   ) => Promise<string>;
   onStop: () => Promise<string>;
   /** Re-read server state (and interfaces) from the backend. */
@@ -89,7 +94,7 @@ interface ServerCardProps {
 
 function ServerCard({
   serverKey, title, desc, defaultRoot, defaultPort, portHint,
-  withAuth, withPassive, defaultPassive = "",
+  withAuth, withPassive, defaultPassive = "", withFtps,
   interfaces, interfacesLoaded, status, onStart, onStop, onRefresh, log,
 }: ServerCardProps) {
   const storageKey = `ftp-toolbox:server:${serverKey}`;
@@ -101,11 +106,15 @@ function ServerCard({
       authMode: "anonymous",
       user: "admin",
       passive: defaultPassive,
+      ftps: false,
     })
   );
   const [pass, setPass] = useState(""); // password intentionally NOT persisted
   const [busy, setBusy] = useState(false);
   const [check, setCheck] = useState<PassivePortCheck | null>(null);
+  // FTPS 自签证书指纹。首次启用时后端会生成证书；这里挂载时读一次，
+  // 「重新生成」后再读一次。读取失败只影响展示，不拦启动。
+  const [cert, setCert] = useState<CertInfo | null>(null);
 
   // Run state is owned by the backend, never by this component: switching pages
   // unmounts the card, which used to reset a local `running` flag and made the
@@ -120,6 +129,37 @@ function ServerCard({
 
   const set = <K extends keyof ServerPrefs>(k: K, v: ServerPrefs[K]) =>
     setPrefs((p) => ({ ...p, [k]: v }));
+
+  // 指纹是给对端核对身份用的，必须一直可查，与开关状态无关
+  // （开着开关才显示会让「关掉再打开」看起来像换了证书）。
+  useEffect(() => {
+    if (!withFtps) return;
+    let cancelled = false;
+    api
+      .ftpsCertInfo()
+      .then((info) => {
+        if (!cancelled) setCert(info);
+      })
+      .catch(() => {
+        if (!cancelled) setCert(null);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [withFtps]);
+
+  const regenerateCert = async () => {
+    setBusy(true);
+    try {
+      const info = await api.ftpsRegenerateCert();
+      setCert(info);
+      log(`已重新生成 FTPS 证书，新指纹 ${info.fingerprint}`);
+    } catch (e) {
+      log(`重新生成证书失败: ${e}`, "error");
+    } finally {
+      setBusy(false);
+    }
+  };
 
   // Windows keeps blocks of TCP ports for itself (Hyper-V/WSL2 reserve
   // 50000-50059 on this machine, right inside the old default range). libunftp
@@ -220,7 +260,8 @@ function ServerCard({
         addr,
         useAccount ? prefs.user : undefined,
         useAccount ? pass : undefined,
-        withPassive ? prefs.passive : undefined
+        withPassive ? prefs.passive : undefined,
+        withFtps ? prefs.ftps : undefined
       );
       log(msg, "ok");
     } catch (e) {
@@ -407,6 +448,42 @@ function ServerCard({
         </>
       )}
 
+      {withFtps && (
+        <>
+          <label className="field">
+            <span>加密（FTPS）</span>
+            <div className="radio-row">
+              <label className="radio">
+                <input
+                  type="checkbox"
+                  checked={prefs.ftps}
+                  onChange={(e) => set("ftps", e.target.checked)}
+                  disabled={running}
+                />
+                启用 FTPS（显式 TLS：支持加密的客户端用 AUTH TLS 升级，明文客户端不受影响）
+              </label>
+            </div>
+          </label>
+          {/* 指纹常显（不随开关收起）：对端核对服务器身份靠它，
+              「关掉开关再看」会让指纹看起来像是换过证书。 */}
+          {cert && (
+            <div className="hint-line note with-action">
+              <span>
+                证书指纹（SHA-256）：
+                <span style={{ fontFamily: "monospace", wordBreak: "break-all" }}>
+                  {cert.fingerprint}
+                </span>
+              </span>
+              {!running && (
+                <button className="btn small" onClick={regenerateCert} disabled={busy}>
+                  重新生成
+                </button>
+              )}
+            </div>
+          )}
+        </>
+      )}
+
       {withAuth && (
         <>
           <label className="field">
@@ -560,6 +637,7 @@ export default function ServersView({ log, ftpStatus, tftpStatus, refresh }: Ser
         portHint="默认 21"
         withAuth
         withPassive
+        withFtps
         // 与 ftp-core 的 DEFAULT_PASSIVE_PORTS (50000..50100) 保持一致
         defaultPassive="50000-50099"
         interfaces={interfaces}

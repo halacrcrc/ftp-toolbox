@@ -1,5 +1,6 @@
 import { useState } from "react";
-import { api, fmtBytes, pathBase, HostKeyStatus, SftpEntry } from "../api";
+import { api, pathBase, HostKeyStatus, SftpEntry } from "../api";
+import { fmtBytes } from "../lib/format";
 import LocalFileField from "../components/LocalFileField";
 import { LogEntry } from "../App";
 

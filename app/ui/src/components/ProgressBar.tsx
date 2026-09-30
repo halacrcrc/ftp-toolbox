@@ -1,5 +1,5 @@
-import { fmtBytes, transferLabel } from "../api";
-import { Progress } from "../App";
+import { fmtBytes } from "../lib/format";
+import { Progress, transferLabel } from "../lib/transfer";
 
 export default function ProgressBar({ progress }: { progress: Progress | null }) {
   if (!progress) return <footer className="progress-footer empty" />;

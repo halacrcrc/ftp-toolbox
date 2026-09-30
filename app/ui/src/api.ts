@@ -10,34 +10,11 @@
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { open, save } from "@tauri-apps/plugin-dialog";
+// 传输相关类型与文案搬到了 `src/lib/transfer.ts`（纯逻辑、可单测），这里只做
+// 转出，方便调用方继续从 api 一处拿齐后端契约。
+import type { TransferEvent, TransferKind } from "./lib/transfer";
 
-/**
- * 后端 `TransferKind` 枚举序列化后的字符串（progress 事件复用，SFTP 变体见
- * 设计文档 §3）。后端枚举当前是 `rename_all = "lowercase"`，故 SftpUpload/
- * SftpDownload 序列化为 "sftpupload"/"sftpdownload"；若后端改用 camelCase 则
- * 是 "sftpUpload"/"sftpDownload" —— 两种拼写都收录，展示统一走 transferLabel。
- */
-export type TransferKind =
-  | "upload"
-  | "download"
-  | "sftpupload"
-  | "sftpdownload"
-  | "sftpUpload"
-  | "sftpDownload";
-
-/** 传输方向 → 中文标签（日志 / 进度条用）。 */
-export function transferLabel(kind: string): "上传" | "下载" {
-  return kind.toLowerCase().endsWith("download") ? "下载" : "上传";
-}
-
-export interface TransferEvent {
-  phase: "started" | "progress" | "done" | "error";
-  kind: TransferKind;
-  file: string;
-  bytes?: number;
-  total?: number | null;
-  message?: string;
-}
+export type { TransferEvent, TransferKind };
 
 export interface NetInterface {
   /** 友好名：Windows 上为「以太网 / WLAN」，Linux/macOS 上为 eth0 / en0。 */
@@ -316,12 +293,4 @@ export function onServerState<T extends ServerStatus = ServerStatus>(
   cb: (status: T) => void
 ) {
   return listen<T>(`${kind}-server-state`, (e) => cb(e.payload));
-}
-
-export function fmtBytes(n: number): string {
-  if (n < 1024) return `${n} B`;
-  if (n < 1024 ** 2) return `${(n / 1024).toFixed(1)} KB`;
-  if (n < 1024 ** 3) return `${(n / 1024 ** 2).toFixed(1)} MB`;
-  if (n < 1024 ** 4) return `${(n / 1024 ** 3).toFixed(2)} GB`;
-  return `${(n / 1024 ** 4).toFixed(2)} TB`;
 }

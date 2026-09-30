@@ -14,8 +14,8 @@
 
 Windows 安装包见 [Releases](https://github.com/halacrcrc/ftp-toolbox/releases/latest)：
 
-- `ftp-toolbox_0.3.0_x64-setup.exe` — NSIS 安装程序，向导式安装（推荐）
-- `ftp-toolbox_0.3.0_x64_en-US.msi` — MSI 安装包，适合批量部署
+- `ftp-toolbox_0.3.1_x64-setup.exe` — NSIS 安装程序，向导式安装（推荐）
+- `ftp-toolbox_0.3.1_x64_en-US.msi` — MSI 安装包，适合批量部署
 
 依赖系统自带 WebView2（Win10/11 通常已预装）。安装包未做代码签名，首次运行 SmartScreen 会提示「未知发布者」，点「仍要运行」即可。
 
@@ -41,7 +41,9 @@ Windows 安装包见 [Releases](https://github.com/halacrcrc/ftp-toolbox/release
   - 共享目录走系统原生文件夹选择框，配置自动记忆（密码不保存）
   - 监听地址自动枚举本机网卡，FTP 默认 21 / TFTP 默认 69 / SFTP 默认 2222（客户端连远端默认 22）
 - **详细运行日志**：后端引擎 + libunftp 会话日志实时推送到前端，TFTP 每次传输记录对端、文件名、字节数、块数、耗时——排错直接看日志面板
-- **现代 UI**：侧边栏导航、卡片式布局、全局传输进度条（React + TypeScript + Vite）
+- **现代 UI**：侧边栏导航、卡片式布局（React + TypeScript + Vite）
+  - 全局传输进度条：百分比 + 已传 / 总量 + **实时速度**（大小未知时只报已传字节与速度）
+  - 传输日志带**大小 · 耗时 · 平均速度**；日志面板逐条显示后端结构化字段（`bytes=` `blocks=` `elapsed_ms=`）
 
 ## 架构
 
@@ -124,8 +126,6 @@ npm run typecheck        # tsc --noEmit
 - [ ] TFTP `tsize` 协商（下载前获知文件大小，进度条可显示百分比）
 - [ ] FTP 远端文件树浏览（拖拽上传/下载）
 - [ ] SFTP 客户端公钥认证（属规格变更，需先定私钥来源）
-- [ ] 安装包代码签名
-- [ ] macOS / Linux 构建
 
 ## License
 

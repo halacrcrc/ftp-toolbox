@@ -177,7 +177,11 @@ AppState 扩展（镜像现有字段）：
 
 - russh 0.63 MSRV 1.89+（本地 1.98.1 ✓）
 - russh 0.63 加密后端强制要求 ring 或 aws-lc-rs 二选一（compile_error），已选 aws-lc-rs（rustls 现用后端，本项目构建链已验证可编译）
-- **杀软误报风险（已发生）**：cargo target 目录（`C:\Users\22534\.workbuddy\build\ftp-toolbox-target`）里新生成的 build-script-build.exe 可能被杀软误杀导致 `os error 5`；该目录需加入杀毒软件白名单
+- **杀软误报风险（已发生）**：cargo target 目录里新生成的 `build-script-build.exe`
+  可能被杀软误杀，表现为构建随机报 `os error 5`；把该目录加入杀软白名单即可。
+  本机（作者的）target 目录曾放在仓库外以规避网盘同步的文件锁，现在这属于**机器级
+  配置**，用 `CARGO_TARGET_DIR` 或 `~/.cargo/config.toml` 指定，仓库里的
+  `.cargo/config.toml` 不再写死路径
 - russh-sftp 完整服务端示例缺失 → 参考 russh 仓库 `sftp_server` / `sftp_client` 示例
 - SFTP v3 POSIX 权限语义在 Windows 服务端只需返回合理默认值
 - 用户惯例：**构建完成后先本地测试确认，再推送**；未经用户确认不要 push

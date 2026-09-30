@@ -83,12 +83,25 @@ ui/node_modules/.bin/tauri build
 
 > ⚠ 请用上面这个项目内的 CLI。`cargo tauri build` 走的是 `cargo install` 装的全局 `cargo-tauri`，它可能是 **1.x**，会拿 v1 的 schema 去校验这份 `tauri.conf.json`（v2 格式）并报一堆 `Additional property 'app' is not allowed`。
 
-产物在 target 的 `release/bundle/{nsis,msi}/`（NSIS 出 `setup.exe`，WiX 出 `.msi`）。
-
-> 本机 `.cargo/config.toml` 把 `target-dir` 指向了仓库外的
-> `C:/Users/22534/.workbuddy/build/ftp-toolbox-target`（避开 OneDrive 对构建脚本的文件锁），
-> 所以产物不在仓库内。仓库根目录的 `dist/` 是发布用的归档目录，被 `.gitignore` 忽略 ——
+> 产物默认落在仓库内的 `target/release/bundle/{nsis,msi}/`（NSIS 出 `setup.exe`，WiX 出 `.msi`）。
+> 仓库根的 `dist/` 是发布用的归档目录，被 `.gitignore` 忽略 ——
 > **安装包不进版本库**，只用于手动上传到 GitHub Releases。
+>
+> 如果你的工作副本放在 OneDrive / 网盘同步目录里（构建脚本会被文件锁和
+> 按需占位文件干扰，报 `os error 5` 或 `LNK1104`），把 target 目录挪出仓库即可，
+> **不要改仓库里的 `.cargo/config.toml`** —— 用环境变量或你自己的 `~/.cargo/config.toml`：
+>
+> ```bash
+> # 环境变量（一次性 / CI 用）
+> export CARGO_TARGET_DIR=~/cargo-target/ftp-toolbox      # macOS/Linux
+> setx CARGO_TARGET_DIR D:\cargo-target\ftp-toolbox       # Windows
+> ```
+>
+> ```toml
+> # ~/.cargo/config.toml（只影响本机，不进版本库）
+> [build]
+> target-dir = "D:/cargo-target/ftp-toolbox"
+> ```
 
 ## 测试
 

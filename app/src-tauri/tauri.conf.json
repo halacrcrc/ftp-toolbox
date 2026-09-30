@@ -30,6 +30,11 @@
     "icon": ["icons/icon.ico"],
     "publisher": "halacrcrc",
     "shortDescription": "FTP/TFTP 服务器与客户端一体工具",
+    "licenseFile": "license.rtf",
+    "resources": {
+      "../../LICENSE-MIT": "LICENSE-MIT",
+      "../../LICENSE-APACHE": "LICENSE-APACHE"
+    },
     "windows": {
       "webviewInstallMode": {
         "silent": true,

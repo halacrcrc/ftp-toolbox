@@ -148,3 +148,6 @@ Apache-2.0 额外提供**明确的专利授权**，对法务敏感的公司用�
 
 - [LICENSE-MIT](LICENSE-MIT)
 - [LICENSE-APACHE](LICENSE-APACHE)
+
+安装程序会在向导第二步展示许可协议（内容见 `app/src-tauri/license.rtf`），
+并把两份全文安装到程序目录，便于分发时满足 Apache-2.0 §4(a) 的随附要求。

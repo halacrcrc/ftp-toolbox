@@ -6,7 +6,7 @@
 ![Tauri](https://img.shields.io/badge/Tauri-v2-24C8D8?logo=tauri)
 ![React](https://img.shields.io/badge/React-18-61DAFB?logo=react)
 ![Platform](https://img.shields.io/badge/platform-Windows-blue?logo=windows)
-![License](https://img.shields.io/badge/license-MIT-green)
+![License](https://img.shields.io/badge/license-MIT_OR_Apache--2.0-blue)
 
 一个窗口同时搞定「起服务」和「传文件」：左边开 FTP / SFTP / TFTP 服务器，右边用内置客户端连上去互传，底部实时进度，后端日志逐条可见——调嵌入式设备、路由器、旧仪器这类只支持 TFTP/FTP 的对端，或者需要一条加密的 SFTP 通道时，不用再东拼西凑一堆小工具。
 
@@ -142,4 +142,9 @@ npm run typecheck        # tsc --noEmit
 
 ## License
 
-MIT
+本项目采用 **MIT 或 Apache-2.0 双许可**，使用者可任选其一（SPDX：`MIT OR Apache-2.0`）。
+与 Rust 生态主流项目（rust-lang、serde、tokio 等）保持一致 —— 相比单一 MIT，
+Apache-2.0 额外提供**明确的专利授权**，对法务敏感的公司用户更友好。
+
+- [LICENSE-MIT](LICENSE-MIT)
+- [LICENSE-APACHE](LICENSE-APACHE)

@@ -4,7 +4,7 @@ members = ["crates/ftp-core", "app/src-tauri"]
 
 [workspace.package]
 edition = "2021"
-license = "MIT"
+license = "MIT OR Apache-2.0"
 
 [profile.release]
 opt-level = 2

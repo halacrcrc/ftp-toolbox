@@ -5,8 +5,11 @@ Rust / TypeScript 的通用规范不在此赘述。
 
 ## 贡献许可（重要）
 
-本项目以 [MIT](LICENSE) 许可发布。**你提交 Pull Request（或以其他方式向本项目提交代码、
-文档、测试等任何内容）即视为你同意：你的贡献按本项目的 MIT 许可证授权给本项目及其使用者。**
+本项目以 **MIT 或 Apache-2.0 双许可**发布（SPDX：`MIT OR Apache-2.0`），使用者可任选其一。
+全文见 [LICENSE-MIT](LICENSE-MIT) 与 [LICENSE-APACHE](LICENSE-APACHE)。
+
+**除非你明确另行声明，否则你有意向本项目提交的任何贡献（代码、文档、测试等），
+均按上述双许可授权，不附加任何额外条款或条件。**
 
 请确保：
 

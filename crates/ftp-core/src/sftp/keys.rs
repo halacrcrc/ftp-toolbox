@@ -7,6 +7,7 @@
 //! directory as one `host:port SHA256:xxx` line per trusted endpoint.
 
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use russh::keys::ssh_key::{Algorithm, HashAlg, LineEnding};
 use russh::keys::{PrivateKey, PublicKey};
@@ -274,6 +275,17 @@ fn upsert_known_host(app_data: &Path, host: &str, port: u16, fingerprint: &str) 
     write_known_hosts_file(&path, &(lines.join("\n") + "\n"))
 }
 
+/// Monotonic counter making each temp file name unique within the process.
+static TMP_SEQ: AtomicU64 = AtomicU64::new(0);
+
+/// `<dir>/known_hosts.<pid>.<seq>.tmp` — the sibling temp file used by the
+/// atomic write below. Kept next to the target so the rename stays within one
+/// filesystem, which is what makes it atomic.
+fn unique_temp_path(path: &Path) -> PathBuf {
+    let seq = TMP_SEQ.fetch_add(1, Ordering::Relaxed);
+    path.with_extension(format!("{}.{seq}.tmp", std::process::id()))
+}
+
 /// Write `payload` to `path` without a window in which a crash leaves a
 /// half-written file: write a sibling temp file, then rename it over the
 /// target (`rename(2)` / `MoveFileEx` replace atomically on the platforms we
@@ -284,8 +296,14 @@ fn upsert_known_host(app_data: &Path, host: &str, port: u16, fingerprint: &str) 
 /// Falls back to an in-place write if the rename cannot be performed (a
 /// scanner holding the temp file, for instance): a non-atomic write still
 /// beats dropping the record.
+///
+/// The temp name is unique per call (review finding 2026-09-30 #12). A fixed
+/// `known_hosts.tmp` was fine for the single-threaded caller it was written
+/// for, but the *name* is what made it unsafe: two concurrent upserts would
+/// write into the same path and rename each other's half-written payload into
+/// place. PID + a monotonic counter closes that without a lock.
 fn write_known_hosts_file(path: &Path, payload: &str) -> Result<()> {
-    let tmp = path.with_extension("tmp");
+    let tmp = unique_temp_path(path);
     match std::fs::write(&tmp, payload).and_then(|()| std::fs::rename(&tmp, path)) {
         Ok(()) => Ok(()),
         Err(e) => {
@@ -375,6 +393,21 @@ mod tests {
             HostKeyState::Unknown
         );
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// 审查发现 2026-09-30 #12：临时文件名必须每次调用都不同，否则两次并发
+    /// upsert 会写进同一个文件，互相把对方的半成品 rename 进正式位置。
+    #[test]
+    fn temp_paths_are_unique_per_call() {
+        let target = Path::new("/x/known_hosts");
+        let a = unique_temp_path(target);
+        let b = unique_temp_path(target);
+        assert_ne!(a, b, "并发 upsert 不能共用同一个临时文件");
+        for p in [&a, &b] {
+            assert_eq!(p.parent(), target.parent(), "临时文件必须与目标同目录，rename 才原子");
+            assert!(p.to_string_lossy().ends_with(".tmp"), "{p:?} 应以 .tmp 结尾");
+            assert!(p.to_string_lossy().starts_with("/x/known_hosts."), "{p:?} 应挂在目标名上");
+        }
     }
 
     /// #9：upsert 走"临时文件 + rename"。正常路径下不该在 keys/ 里留下 .tmp 残留，

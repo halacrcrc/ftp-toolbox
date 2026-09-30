@@ -767,6 +767,13 @@ impl russh_sftp::server::Handler for SftpSessionHandler {
         // 事件必须和 open/close 一致 —— 同一个句柄不能一会儿 Upload 一会儿
         // Download（审查发现 #5）。
         let kind = transfer_kind_for(*write);
+        // `len == 0` 不是"要数据"：读进 0 字节缓冲必然得到 `n == 0`，会被下面
+        // 当成文件结尾回一个 `SSH_FX_EOF` —— 那等于告诉对端"文件到此为止"
+        // （审查发现 2026-09-30 #11）。回一个空 `Data` 才是诚实的答复，而且
+        // 必须在 seek 之前返回，免得一次空读把偏移/计数搅乱。
+        if len == 0 {
+            return Ok(Data { id, data: Vec::new() });
+        }
         file.seek(std::io::SeekFrom::Start(offset))
             .await
             .map_err(io_to_status)?;
@@ -1370,6 +1377,40 @@ mod tests {
             .data;
         assert_eq!(data.len(), 4096, "应返回真实读到的字节数，而非请求量");
         assert!(data.iter().all(|b| *b == b'x'), "内容应完整正确");
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// 审查发现 2026-09-30 #11：0 长度 READ 曾被应答成 `SSH_FX_EOF`（读进 0 字节
+    /// 缓冲必然 `n == 0`），等于告诉对端文件到此为止。应回空 `Data`，且不得消耗
+    /// 文件偏移或传输计数。
+    #[tokio::test]
+    async fn zero_length_read_is_not_answered_with_eof() {
+        use russh_sftp::server::Handler;
+        let dir = temp_dir_with("sftp-read-zero");
+        std::fs::write(dir.join("f.txt"), b"0123456789").unwrap();
+        let mut h = SftpSessionHandler::new(session_cfg(dir.clone(), false));
+
+        let handle = h
+            .open(0, "/f.txt".into(), OpenFlags::READ, FileAttributes::default())
+            .await
+            .expect("纯 READ 应放行")
+            .handle;
+        let data = h
+            .read(0, handle.clone(), 0, 0)
+            .await
+            .expect("0 长度 READ 不该回 EOF")
+            .data;
+        assert!(data.is_empty(), "0 长度 READ 应回空 Data，实际 {data:?}");
+
+        // 紧接着的正常读必须照常拿到内容：证明那次空读没有 seek、也没有把
+        // 文件读到结尾。
+        let data = h
+            .read(0, handle, 0, 10)
+            .await
+            .expect("0 长度 READ 之后正常读应照常")
+            .data;
+        assert_eq!(data, b"0123456789".to_vec(), "0 长度 READ 不应推进偏移或消耗文件");
 
         let _ = std::fs::remove_dir_all(&dir);
     }

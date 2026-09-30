@@ -1,10 +1,11 @@
-# 本文件包含【本机开发配置】，随仓库分发；在其他机器上构建前请按需调整：
-# - rsproxy 镜像：仅在中国大陆网络环境有意义，其他环境可直接删除 [source.*]
-#   与 [registries.rsproxy] 段落
-# - target-dir：指向作者本机的绝对路径，其他机器必须改成自己的本地路径
-#   （放在仓库外是为了规避 OneDrive 同步对构建脚本的文件锁/占位文件干扰）
+# 项目级 cargo 配置，随仓库分发。
+#
+# 这里**只放对所有贡献者都成立**的设置。机器相关的东西（绝对路径、代理、
+# 镜像偏好）请写进你自己的 ~/.cargo/config.toml 或用环境变量，不要提交。
 
-# Use rsproxy (字节跳动) mirror for crates.io — much faster in China.
+# 中国大陆网络下用 rsproxy（字节跳动）镜像拉 crates.io，快很多。
+# 其他网络环境可以直接删掉下面三段 [source.*] / [registries.rsproxy]，
+# cargo 会回落到官方 registry。
 [source.crates-io]
 replace-with = "rsproxy-sparse"
 
@@ -14,9 +15,12 @@ registry = "sparse+https://rsproxy.cn/index/"
 [registries.rsproxy]
 index = "sparse+https://rsproxy.cn/index/"
 
+# 沙箱/代理环境下 git 依赖用 CLI 拉取，避免内建 HTTP 客户端被拦。
 [net]
 git-fetch-with-cli = true
 
-# OneDrive 目录会干扰构建脚本（文件锁/按需占位），target 放到本地目录
-[build]
-target-dir = "C:/Users/22534/.workbuddy/build/ftp-toolbox-target"
+# 想把 target 目录放到仓库外（例如仓库位于 OneDrive / 网盘同步目录，构建脚本
+# 会被文件锁或按需占位文件干扰），不要在这里写死路径 —— 用环境变量：
+#   Windows:  setx CARGO_TARGET_DIR D:\cargo-target\ftp-toolbox
+#   macOS/Linux:  export CARGO_TARGET_DIR=~/cargo-target/ftp-toolbox
+# 或者只在你自己的 ~/.cargo/config.toml 里加 [build] target-dir。

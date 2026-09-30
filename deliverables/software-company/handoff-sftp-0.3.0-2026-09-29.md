@@ -228,19 +228,37 @@ node .../gui-e2e.mjs eval "<任意JS>"         # 直接观察 IPC 返回值
 ## 六、遗留项 / 建议的下一步
 
 **需要用户决策**
-1. `git push`（本次已提交但未推送）。
+1. `git push` 本次后续修复（`fix(sftp): …`）—— 按用户惯例，构建 + 本地测试通过后待确认再推。
+   （0.3.0 主提交 `4c78328` 已推送至 `origin/main`；推送时若走代理报 `Failed to connect ... over proxy 127.0.0.1`
+   是 `git config http.proxy=http://127.0.0.1:10808` 指向了未运行的代理，用 `git -c http.proxy= push origin main` 绕过。）
 2. 把 `C:\Users\22534\.workbuddy\build\ftp-toolbox-target` 加入杀软白名单，否则构建会随机 `os error 5`。
 
-**功能缺口（非本次范围）**
-3. `SftpClient` 只实现密码认证（`authenticate_password`），**没有公钥认证**。
-   本次联调靠"服务端空密码启动 + 客户端空口令"绕过（服务端判据是 `password == cfg.password`，
-   空口令同样通过）。若产品上要支持客户端公钥登录，需补 `authenticate_publickey`。
-4. 只读模式下上传失败的报错文案重复：`Permission denied: Permission denied`
-   （`StatusCode` 的 `Display` 与包装层各加了一次），属文案瑕疵。
+**已闭环（v0.3.0 后续小修）**
+3. 只读模式下上传失败的报错文案重复：`Permission denied: Permission denied` —— **已修**。
+   根因在 russh-sftp 自身：服务端对失败请求回的是裸 `StatusCode`，库会把 `SSH_FXP_STATUS.error_message`
+   默认成状态码自己的文本（`server/mod.rs` 的 `unwrap_or_else(|| status_code.to_string())`），
+   客户端 `Error::Status` 的 `Display` 又是 `"{status_code}: {error_message}"`，于是同一个码出现两次。
+   现在 `client.rs::describe_sftp_error` 在格式化时去重（服务端真带了说明则保留），
+   `sftp_io_err` 另覆盖传输途中被 `AsyncRead`/`AsyncWrite` 包成 `io::Error` 的协议错误。
+   回归覆盖：`client.rs` 6 个单测 + `sftp_loopback::sftp_read_only_rejects_writes` 的端到端精确断言。
+
+**设计如此，非遗漏**
+4. `SftpClient` 只实现密码认证（`authenticate_password`），没有公钥认证。
+   这是 `docs/sftp-design.md` §2.3 与 §三 冻结的契约 —— `SftpClientConfig { host, port, username, password }`、
+   `sftp_client_connect(host, port, username, password, trust_new_host)`。公钥认证是**服务端**能力
+   （Q2/Q11 的 `validate_public_key`，已实现并有测试）。若产品上要支持客户端公钥登录，
+   属规格变更，需先定密钥来源/口令处理，再补 `authenticate_publickey`。
+   （本次联调靠"服务端空密码启动 + 客户端空口令"绕过：服务端判据是 `password == cfg.password`，
+   空口令同样通过。）
 
 **工程卫生**
 5. `.workbuddy-ai/`（AI 助手项目数据，含逐日记忆）本次已加入 `.gitignore`，与既有的 `.workbuddy/` 一致。
    其中 `memory/2026-09-29.md` 记录了本次全部排查细节，**有意不入库**；关键结论已浓缩进本文。
+6. `cargo clippy -p ftp-core --all-targets` 目前是**红的**，但**全是既有问题**，与本次修复无关：
+   `ftp/passive.rs:263` 的 `reversed_empty_ranges`（默认 deny，故意的反向区间测试）为 error，
+   `sftp/server.rs` 4 处 `field_reassign_with_default`、`net.rs:182` 的 `useless_vec` 为 warning。
+   本次改动（`client.rs`、`sftp_loopback.rs`）clippy 干净。另外全仓库并非 rustfmt 干净
+   （`app/src-tauri/src/lib.rs`、`client.rs` 既有段落都有漂移），故未整体 `cargo fmt`，以免产生无关 diff。
 
 ---
 

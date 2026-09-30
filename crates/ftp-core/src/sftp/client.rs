@@ -326,8 +326,9 @@ impl SftpClient {
                 Ok(0) => break Ok(sent),
                 Ok(n) => {
                     if let Err(e) = remote_file.write_all(&buf[..n]).await {
-                        // russh-sftp 的 File 走 tokio AsyncWrite，错误已映射为 io::Error
-                        break Err(Error::Io(e));
+                        // russh-sftp 的 File 走 tokio AsyncWrite，错误已映射为 io::Error；
+                        // 用 sftp_io_err 取回原始协议错误，避免状态码被重复渲染。
+                        break Err(sftp_io_err(e));
                     }
                     sent += n as u64;
                     TransferEvent::emit(
@@ -408,7 +409,7 @@ impl SftpClient {
                             },
                         );
                     }
-                    Err(e) => return Err(Error::Io(e)),
+                    Err(e) => return Err(sftp_io_err(e)),
                 }
             }
             out.flush().await?;
@@ -465,6 +466,135 @@ fn russh_core_err(e: russh::Error) -> Error {
     Error::Config(format!("SFTP 连接错误: {e}"))
 }
 
+/// Render one SFTP protocol error without repeating the status code.
+///
+/// A server answers a failed request with `SSH_FXP_STATUS`, and russh-sftp
+/// defaults that packet's `error_message` to the status code's *own* text
+/// (`error_message.unwrap_or_else(|| status_code.to_string())`,
+/// `server/mod.rs`). Its client-side `Error::Status` then renders as
+/// `"{status_code}: {error_message}"`, so a bare code comes back doubled —
+/// `"Permission denied: Permission denied"`. Collapse that redundancy, while
+/// keeping any message that genuinely adds information.
+fn describe_sftp_error(e: &SftpError) -> String {
+    match e {
+        SftpError::Status(status) => {
+            let code = status.status_code.to_string();
+            let message = status.error_message.trim();
+            if message.is_empty() || message == code {
+                code
+            } else {
+                format!("{code}: {message}")
+            }
+        }
+        other => other.to_string(),
+    }
+}
+
 fn sftp_core_err(e: SftpError) -> Error {
-    Error::Config(format!("SFTP 会话错误: {e}"))
+    Error::Config(format!("SFTP 会话错误: {}", describe_sftp_error(&e)))
+}
+
+/// Same as [`sftp_core_err`] for the transfer paths: russh-sftp's `AsyncRead`
+/// / `AsyncWrite` impls convert their own [`SftpError`] into [`std::io::Error`]
+/// (`Error::into`, which boxes the original as the source), so a mid-transfer
+/// rejection would otherwise surface through the lossy `io::Error` Display and
+/// duplicate the code a second time. Recover the original when it is there.
+fn sftp_io_err(e: std::io::Error) -> Error {
+    // `get_ref` 而不是 `into_inner`：后者会移走 `e`，就没法在没取到时原样返回了。
+    if let Some(sftp) = e
+        .get_ref()
+        .and_then(|inner| inner.downcast_ref::<SftpError>())
+    {
+        return Error::Config(format!("SFTP 会话错误: {}", describe_sftp_error(sftp)));
+    }
+    Error::Io(e)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use russh_sftp::protocol::{Status, StatusCode};
+
+    /// The exact packet russh-sftp builds for a bare `Err(StatusCode)` — this
+    /// mirrors `server/mod.rs`'s `unwrap_or_else(|| status_code.to_string())`,
+    /// which is what makes the message redundant in the first place.
+    fn bare_status(code: StatusCode) -> Status {
+        Status {
+            id: 1,
+            status_code: code,
+            error_message: code.to_string(),
+            language_tag: "en-US".to_string(),
+        }
+    }
+
+    #[test]
+    fn redundant_status_message_is_collapsed() {
+        let err = SftpError::Status(bare_status(StatusCode::PermissionDenied));
+        // 修前是 "Permission denied: Permission denied"（russh-sftp 的
+        // `"{code}: {message}"` 拼接，而 message 恰好等于 code 文本）。
+        assert_eq!(describe_sftp_error(&err), "Permission denied");
+        assert_eq!(
+            sftp_core_err(err).to_string(),
+            "SFTP 会话错误: Permission denied"
+        );
+    }
+
+    #[test]
+    fn every_bare_status_code_renders_once() {
+        for code in [
+            StatusCode::PermissionDenied,
+            StatusCode::NoSuchFile,
+            StatusCode::Failure,
+            StatusCode::BadMessage,
+            StatusCode::OpUnsupported,
+        ] {
+            let rendered = describe_sftp_error(&SftpError::Status(bare_status(code)));
+            let text = code.to_string();
+            assert_eq!(rendered, text, "{code:?} 应只出现一次");
+            assert!(
+                !rendered.contains(':'),
+                "{code:?} 不该被重复拼接: {rendered}"
+            );
+        }
+    }
+
+    #[test]
+    fn server_supplied_message_is_preserved() {
+        // 服务端若真的带了说明，必须保留——只去掉与状态码重复的那一份。
+        let err = SftpError::Status(Status {
+            error_message: "服务器处于只读模式，拒绝写入".to_string(),
+            ..bare_status(StatusCode::PermissionDenied)
+        });
+        assert_eq!(
+            describe_sftp_error(&err),
+            "Permission denied: 服务器处于只读模式，拒绝写入"
+        );
+    }
+
+    #[test]
+    fn empty_message_falls_back_to_the_code() {
+        let err = SftpError::Status(Status {
+            error_message: "   ".to_string(),
+            ..bare_status(StatusCode::NoSuchFile)
+        });
+        assert_eq!(describe_sftp_error(&err), "No such file");
+    }
+
+    #[test]
+    fn io_wrapped_sftp_error_recovers_the_status() {
+        // 传输途中（AsyncRead/AsyncWrite）错误被包成 io::Error，必须仍能取回协议错误。
+        let io = std::io::Error::from(SftpError::Status(bare_status(StatusCode::PermissionDenied)));
+        assert_eq!(
+            sftp_io_err(io).to_string(),
+            "SFTP 会话错误: Permission denied"
+        );
+    }
+
+    #[test]
+    fn plain_io_error_is_left_alone() {
+        let io = std::io::Error::new(std::io::ErrorKind::NotFound, "no such local file");
+        let rendered = sftp_io_err(io).to_string();
+        assert!(rendered.contains("no such local file"), "{rendered}");
+        assert!(!rendered.contains("SFTP 会话错误"), "{rendered}");
+    }
 }

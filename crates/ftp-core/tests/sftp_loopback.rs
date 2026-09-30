@@ -310,7 +310,15 @@ async fn sftp_read_only_rejects_writes() {
         !root.join("nope.bin").exists(),
         "被拒绝的上传不应在磁盘上留下文件"
     );
-    assert!(err.to_string().contains("SFTP"), "错误应来自 SFTP 会话层: {err}");
+    // 端到端钉死用户可见文案：服务端回的是裸 `StatusCode::PermissionDenied`，
+    // 而 russh-sftp 会把 SSH_FXP_STATUS 的 error_message 默认成状态码自身文本，
+    // 客户端再拼成 `"{code}: {message}"` —— 曾经因此显示成
+    // "Permission denied: Permission denied"。这里断言它只出现一次。
+    assert_eq!(
+        err.to_string(),
+        "SFTP 会话错误: Permission denied",
+        "只读拒绝文案不应重复状态码"
+    );
 
     client.disconnect().await.unwrap();
     handle.stop().await;

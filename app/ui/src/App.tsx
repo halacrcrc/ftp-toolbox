@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import {
   api,
   fmtBytes,
@@ -30,6 +30,36 @@ export interface Progress {
   kind: TransferKind;
   bytes: number;
   total: number | null;
+  /** Start time (ms epoch) — the basis for elapsed time and average speed. */
+  startedAt: number;
+  /** Previous sample: how many bytes had moved at `lastAt`. */
+  lastBytes: number;
+  lastAt: number;
+  /** Throughput in bytes/s, EMA-smoothed (see the progress handler). */
+  speed: number;
+}
+
+/**
+ * "（7.9 MB）" for a started event. The size is genuinely unknown for TFTP
+ * downloads (no `tsize` negotiation) and FTP downloads from servers that
+ * refuse `SIZE` — say so instead of leaving the user staring at a spinner.
+ */
+function sizeSuffix(total: number | null): string {
+  return total && total > 0 ? `（${fmtBytes(total)}）` : "（大小未知）";
+}
+
+/**
+ * "7.9 MB · 2.4s · 平均 3.3 MB/s" for a done event. Elapsed and average are
+ * omitted below 100 ms: a 4 KB file over loopback would otherwise report
+ * "0.0s · 平均 51 MB/s", which is noise pretending to be precision.
+ */
+function doneSuffix(bytes: number, elapsed: number | null): string {
+  const parts = [fmtBytes(bytes)];
+  if (elapsed !== null && elapsed >= 0.1) {
+    parts.push(`${elapsed.toFixed(1)}s`);
+    parts.push(`平均 ${fmtBytes(bytes / elapsed)}/s`);
+  }
+  return parts.join(" · ");
 }
 
 const TITLES: Record<ViewKey, string> = {
@@ -48,6 +78,8 @@ export default function App() {
   const [view, setView] = useState<ViewKey>("servers");
   const [logs, setLogs] = useState<LogEntry[]>([]);
   const [progress, setProgress] = useState<Progress | null>(null);
+  // Read synchronously by the progress handler (see the effect below).
+  const progressRef = useRef<Progress | null>(null);
   // Server run state lives here (App never unmounts) and is always re-read from
   // the backend when the servers page is opened — the pages themselves are
   // mounted/unmounted on navigation, so component-local state would be lost.
@@ -98,28 +130,67 @@ export default function App() {
 
   // Single global subscription: the backend pushes TransferEvents for all
   // transfers; we mirror them into the footer progress bar and the log.
+  //
+  // `progressRef` shadows the state because this effect is built once (`[log]`
+  // deps) and the speed/elapsed maths needs the *current* sample — React state
+  // read from the closure would be the one captured when the effect ran.
   useEffect(() => {
+    const apply = (next: Progress | null) => {
+      progressRef.current = next;
+      setProgress(next);
+    };
     const unlisten = onTransferProgress((ev) => {
+      // An event for a different file means either a fresh transfer whose
+      // "started" we missed, or two streams interleaving into this single slot
+      // (the loopback case). Never fold its byte count into the previous
+      // file's rate — that produces a nonsense speed spike.
+      const prev =
+        progressRef.current &&
+        progressRef.current.file === ev.file &&
+        progressRef.current.kind === ev.kind
+          ? progressRef.current
+          : null;
+      const fresh = (): Progress => {
+        const now = Date.now();
+        return {
+          file: ev.file,
+          kind: ev.kind,
+          bytes: 0,
+          total: ev.total ?? null,
+          startedAt: now,
+          lastBytes: 0,
+          lastAt: now,
+          speed: 0,
+        };
+      };
       switch (ev.phase) {
         case "started":
-          setProgress({ file: ev.file, kind: ev.kind, bytes: 0, total: ev.total ?? null });
-          log(`${transferLabel(ev.kind)}开始: ${ev.file}`);
+          apply(fresh());
+          log(`${transferLabel(ev.kind)}开始: ${ev.file}${sizeSuffix(ev.total ?? null)}`);
           break;
-        case "progress":
-          setProgress({
-            file: ev.file,
-            kind: ev.kind,
-            bytes: ev.bytes ?? 0,
-            total: ev.total ?? null,
-          });
+        case "progress": {
+          const now = Date.now();
+          const bytes = ev.bytes ?? 0;
+          const base = prev ?? fresh();
+          // Instantaneous rate over the last interval, then an EMA on top:
+          // raw per-event deltas jump far too much to read, and one stalled
+          // chunk would otherwise report 0 B/s.
+          const dt = Math.max(1, now - base.lastAt) / 1000;
+          const instant = Math.max(0, bytes - base.lastBytes) / dt;
+          const speed = base.speed > 0 ? base.speed * 0.7 + instant * 0.3 : instant;
+          apply({ ...base, bytes, total: ev.total ?? base.total, lastBytes: bytes, lastAt: now, speed });
           break;
-        case "done":
-          log(`完成: ${ev.file}（${fmtBytes(ev.bytes ?? 0)}）`, "ok");
-          setProgress(null);
+        }
+        case "done": {
+          const bytes = ev.bytes ?? 0;
+          const elapsed = prev ? (Date.now() - prev.startedAt) / 1000 : null;
+          log(`完成: ${ev.file}（${doneSuffix(bytes, elapsed)}）`, "ok");
+          apply(null);
           break;
+        }
         case "error":
           log(`传输错误: ${ev.file}: ${ev.message ?? "未知错误"}`, "error");
-          setProgress(null);
+          apply(null);
           break;
       }
     });
@@ -136,7 +207,12 @@ export default function App() {
       const level = ev.level === "ERROR" || ev.level === "WARN" ? "error" : "info";
       // shorten "ftp_core::tftp::server" style targets for readability
       const target = ev.target.replace(/^ftp_core::/, "").replace(/^ftp_toolbox_app.*/, "app");
-      log(`[${target}] ${ev.message}`, level);
+      // Structured fields used to be dropped by the backend, so e.g. TFTP only
+      // ever showed "tftp send complete" here with no byte count.
+      const fields = ev.fields?.length
+        ? `  ${ev.fields.map(([k, v]) => `${k}=${v}`).join(" ")}`
+        : "";
+      log(`[${target}] ${ev.message}${fields}`, level);
     });
     return () => {
       unlisten.then((f) => f());

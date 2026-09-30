@@ -1230,28 +1230,46 @@ impl<S: tracing::Subscriber> tracing_subscriber::Layer<S> for FrontendLogLayer {
         event: &tracing::Event<'_>,
         _ctx: tracing_subscriber::layer::Context<'_, S>,
     ) {
-        // tracing stores the formatted message in a field literally named "message".
-        struct MsgVisitor(String);
-        impl tracing::field::Visit for MsgVisitor {
+        // tracing stores the formatted message in a field literally named
+        // "message"; everything else is structured context. Those extra fields
+        // used to be dropped on the floor here, so the UI log view showed a
+        // bare "tftp send complete" while the README promises byte, block and
+        // elapsed counts — the stats only ever reached the terminal via the
+        // `fmt` layer. Collect them alongside the message and ship both.
+        //
+        // Both `record_debug` and `record_str` are needed: a `%`-formatted
+        // (Display) field arrives as `record_debug`, and `DisplayValue`'s Debug
+        // forwards to the inner Display, so it renders *without* quotes.
+        struct FieldVisitor {
+            message: String,
+            fields: Vec<(String, String)>,
+        }
+        impl tracing::field::Visit for FieldVisitor {
             fn record_debug(&mut self, field: &tracing::field::Field, value: &dyn std::fmt::Debug) {
+                let rendered = format!("{value:?}");
                 if field.name() == "message" {
-                    self.0 = format!("{value:?}");
+                    self.message = rendered;
+                } else {
+                    self.fields.push((field.name().to_string(), rendered));
                 }
             }
             fn record_str(&mut self, field: &tracing::field::Field, value: &str) {
                 if field.name() == "message" {
-                    self.0 = value.to_string();
+                    self.message = value.to_string();
+                } else {
+                    self.fields.push((field.name().to_string(), value.to_string()));
                 }
             }
         }
-        let mut visitor = MsgVisitor(String::new());
+        let mut visitor = FieldVisitor { message: String::new(), fields: Vec::new() };
         event.record(&mut visitor);
         let _ = self.app.emit(
             "backend-log",
             serde_json::json!({
                 "level": event.metadata().level().as_str(),
                 "target": event.metadata().target(),
-                "message": visitor.0,
+                "message": visitor.message,
+                "fields": visitor.fields,
             }),
         );
     }

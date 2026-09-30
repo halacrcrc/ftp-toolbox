@@ -22,6 +22,10 @@ export default function ProgressBar({ progress }: { progress: Progress | null })
         {pct !== null ? `${pct}% · ` : ""}
         {fmtBytes(progress.bytes)}
         {progress.total ? ` / ${fmtBytes(progress.total)}` : ""}
+        {/* Speed is the only usable signal when the size is unknown (TFTP
+            downloads), and it is EMA-smoothed upstream. Hidden until the first
+            real sample exists — a leading "0 B/s" is just noise. */}
+        {progress.speed > 0 ? ` · ${fmtBytes(progress.speed)}/s` : ""}
       </span>
     </footer>
   );

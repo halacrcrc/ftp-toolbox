@@ -153,6 +153,12 @@ export interface BackendLog {
   level: "TRACE" | "DEBUG" | "INFO" | "WARN" | "ERROR";
   target: string;
   message: string;
+  /**
+   * Structured tracing fields as `[name, value]` pairs (e.g. `bytes`,
+   * `blocks`, `elapsed_ms`). Only the `message` used to be forwarded, so these
+   * never reached the UI log view. Optional: some events carry no fields.
+   */
+  fields?: [string, string][];
 }
 
 export const api = {

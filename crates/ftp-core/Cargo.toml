@@ -35,3 +35,6 @@ rand = { version = "0.10", features = ["thread_rng"] }
 [dev-dependencies]
 # 序列化契约回归测试用（IPC 结构体的 camelCase 字段名）。
 serde_json = "1"
+# 仅 log_fields 的单测需要：搭一个捕获层把 tracing::Event 递给 event_parts。
+# workspace 里 Tauri 壳已在用同版本，不会额外拉包。
+tracing-subscriber = "0.3"

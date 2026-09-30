@@ -181,3 +181,32 @@ AppState 扩展（镜像现有字段）：
 - russh-sftp 完整服务端示例缺失 → 参考 russh 仓库 `sftp_server` / `sftp_client` 示例
 - SFTP v3 POSIX 权限语义在 Windows 服务端只需返回合理默认值
 - 用户惯例：**构建完成后先本地测试确认，再推送**；未经用户确认不要 push
+
+### 已知限制（2026-09-30 代码审查确认 —— 均为知情取舍，不是缺陷）
+
+1. **root 约束不解析符号链接**（`server.rs::safe_path`）。路径约束是**词法层**
+   的：逐段拒绝 `..`、反斜杠与冒号，但不解析符号链接 —— root **内部**一个指向
+   外部的链接会被 `open`/`read`/`stat`/`opendir` 正常跟随。
+   与 OpenSSH `sftp-server` 行为一致；且服务端没有建链入口（`symlink` 回
+   `OpUnsupported`），所以实际威胁模型是"共享目录的本地属主自己放了链接"。
+   **`root_dir` 是共享边界，不是沙箱** —— 不要把不信任的目录挂成 root。
+2. **回环场景进度条有两个事件源**。GUI 客户端连本应用自己的 SFTP 服务端时，
+   客户端与服务端各上报一路进度，kind 相同、file id 都是远程路径，汇入
+   `App.tsx` 的全局单槽位后数字会两边跳。FTP 模块存在同样行为，属既有设计。
+3. `opendir` 一次性把整个目录读入内存（`readdir` 的 256 条分批只影响单次回包
+   大小），超大目录会有一次内存尖峰。流式化会把 IO 错误从 `opendir` 推迟到
+   `readdir`，改变客户端看到的错误时序，故暂不改动。
+4. `rename` 是"先删目标再改名"：若紧接着的 `rename(2)` 自身失败（磁盘满、
+   权限变化等），目标已被删除。posix-rename 语义的固有窗口。
+5. 客户端只支持密码认证是 Q5 的设计契约，不是缺口；要加客户端公钥登录属规格
+   变更。
+
+### 资源上限与超时（2026-09-30 审查加固项落地）
+
+- `SSH_FXP_READ` 的 `len` 由对端控制，服务端按 `MAX_READ_CHUNK = 1 MiB` 封顶，
+  而不是按请求量裸分配；超出部分由对端在下一个 offset 重新请求（SFTP v3 允许
+  短读，EOF 另有 `SSH_FX_EOF`）。
+- `SftpClient::connect` 受 `CONNECT_TIMEOUT = 15s` 约束（握手 → 认证 → 子系统）。
+  刻意**不用** russh 的 `inactivity_timeout`：那是整条连接的会话级定时器，而本
+  应用把一个长生命周期的 `SftpClient` 存在 `AppState` 里跨命令复用，空闲的健康
+  会话不该被它悄悄断开。指纹探针是短连接，`inactivity_timeout` 正合适。

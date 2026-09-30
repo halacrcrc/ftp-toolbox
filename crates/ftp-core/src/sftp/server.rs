@@ -42,6 +42,30 @@ type SftpResult<T> = std::result::Result<T, StatusCode>;
 /// through the blanket `From<T> for T`.
 type SshResult<T> = std::result::Result<T, russh::Error>;
 
+/// Upper bound on the buffer one `SSH_FXP_READ` may allocate (review finding
+/// 2026-09-30 #1). The request's `len` is chosen by the peer: a client asking
+/// for 4 GiB per request would have the server eagerly allocate that much per
+/// connection, which is a cheap way to put real memory pressure on the host.
+/// Well-behaved clients (OpenSSH, FileZilla) ask for 32–64 KiB, so the cap
+/// costs them nothing — an oversized request is simply answered with fewer
+/// bytes and the client re-requests at the next offset, which is legal SFTP
+/// v3 (a short read is not EOF; EOF is `SSH_FX_EOF`).
+const MAX_READ_CHUNK: usize = 1024 * 1024;
+
+/// How many bytes to actually buffer for a read of `requested` bytes —
+/// [`MAX_READ_CHUNK`] caps whatever the peer asked for.
+fn read_chunk_len(requested: u32) -> usize {
+    usize::try_from(requested).unwrap_or(usize::MAX).min(MAX_READ_CHUNK)
+}
+
+/// Progress direction for a file handle, as seen from the peer: a handle
+/// opened for writing means the peer is uploading. Shared by `open`/`read`/
+/// `close` so a single handle cannot report two different directions (review
+/// finding #5).
+fn transfer_kind_for(write: bool) -> TransferKind {
+    if write { TransferKind::SftpUpload } else { TransferKind::SftpDownload }
+}
+
 /// Server knobs the GUI exposes (design §2.2).
 #[derive(Debug, Clone)]
 pub struct SftpServerConfig {
@@ -140,6 +164,16 @@ pub async fn start_sftp_server(
             "共享目录不存在或不是目录: {}",
             cfg.root_dir.display()
         )));
+    }
+    // 空用户名会让**所有**登录必然失败：两个认证回调的门都是
+    // `!username.is_empty()`，留空等于把服务开成一个谁也进不来的服务，而用户
+    // 只会看到「被拒绝」，无法判断是密码错了还是压根没配用户名。在开端口之前
+    // 就拦下（审查发现 #6）。判定与认证门的写法保持一致（只判空，不 trim），
+    // 免得出现"启动放行但登录必拒"的错位。
+    if cfg.username.is_empty() {
+        return Err(Error::Config(
+            "SFTP 用户名不能为空：留空会让所有登录尝试都被拒绝，请填写一个用户名".to_string(),
+        ));
     }
 
     let (host_key, host_key_info) = keys::load_or_generate_host_key(app_data)?;
@@ -403,6 +437,15 @@ impl SftpSessionHandler {
 
     /// Anchor a client-supplied POSIX-ish path below the session root and
     /// reject traversal: no `..`, no backslash/colon smuggling (§2.2).
+    ///
+    /// **Known limitation (review finding #3, also recorded in
+    /// `docs/sftp-design.md` §七)**: the constraint is *lexical* only —
+    /// symlinks are never resolved. A link living inside the root that points
+    /// outside it is followed by `open`/`read`/`stat`/`opendir` like any other
+    /// path. This matches OpenSSH's `sftp-server`, and the server offers no
+    /// way to *create* a link (`symlink` answers `OpUnsupported`), so the
+    /// practical threat model is "the local owner of the shared directory put
+    /// a link there". Treat `root_dir` as a sharing boundary, not a sandbox.
     fn safe_path(&self, remote: &str) -> SftpResult<PathBuf> {
         let mut out = self.cfg.root.clone();
         for seg in remote.split('/') {
@@ -686,7 +729,7 @@ impl russh_sftp::server::Handler for SftpSessionHandler {
             total,
         });
         // 对端视角的方向：写打开 = 对端上传，读打开 = 对端下载。
-        let kind = if write { TransferKind::SftpUpload } else { TransferKind::SftpDownload };
+        let kind = transfer_kind_for(write);
         TransferEvent::emit(
             &self.cfg.progress,
             TransferEvent::Started { kind, file: filename.clone(), total },
@@ -697,7 +740,7 @@ impl russh_sftp::server::Handler for SftpSessionHandler {
     async fn close(&mut self, id: u32, handle: String) -> SftpResult<Status> {
         match self.handles.remove(&handle) {
             Some(SftpHandle::File { remote_path, write, transferred, .. }) => {
-                let kind = if write { TransferKind::SftpUpload } else { TransferKind::SftpDownload };
+                let kind = transfer_kind_for(write);
                 TransferEvent::emit(
                     &self.cfg.progress,
                     TransferEvent::Done { kind, file: remote_path, bytes: transferred },
@@ -720,11 +763,16 @@ impl russh_sftp::server::Handler for SftpSessionHandler {
         let SftpHandle::File { file, remote_path, write, transferred, total } = state else {
             return Err(StatusCode::BadMessage);
         };
-        let _ = write; // 读句柄也可能同时以写打开；SFTP v3 read 不区分
+        // 读句柄也可能同时以写打开（RW）；SFTP v3 的 read 不区分方向，但进度
+        // 事件必须和 open/close 一致 —— 同一个句柄不能一会儿 Upload 一会儿
+        // Download（审查发现 #5）。
+        let kind = transfer_kind_for(*write);
         file.seek(std::io::SeekFrom::Start(offset))
             .await
             .map_err(io_to_status)?;
-        let mut buf = vec![0u8; len as usize];
+        // `len` 由对端给出，不能直接拿来分配（#1）——按 MAX_READ_CHUNK 封顶，
+        // 超出的部分由对端在下一个 offset 重新请求。
+        let mut buf = vec![0u8; read_chunk_len(len)];
         let n = file.read(&mut buf).await.map_err(io_to_status)?;
         if n == 0 {
             // End of file per SFTP v3: SSH_FX_EOF, not an error page.
@@ -738,7 +786,7 @@ impl russh_sftp::server::Handler for SftpSessionHandler {
         TransferEvent::emit(
             &self.cfg.progress,
             TransferEvent::Progress {
-                kind: TransferKind::SftpDownload,
+                kind,
                 file: remote_path.clone(),
                 bytes: *transferred,
                 total: *total,
@@ -824,6 +872,11 @@ impl russh_sftp::server::Handler for SftpSessionHandler {
         if !tokio::fs::metadata(&dir).await.map(|m| m.is_dir()).unwrap_or(false) {
             return Err(StatusCode::NoSuchFile);
         }
+        // 已知取舍（审查发现 #4）：整目录在 opendir 时一次性读入内存，readdir
+        // 的 256 条分批只是**回包**分批，不减少内存占用，所以超大目录会有一次
+        // 内存尖峰。保持现状而不改成惰性读取，是因为流式化会把 opendir 阶段的
+        // IO 错误（权限、目录消失）推迟到 readdir，改变客户端看到的错误时序。
+        // 真需要支持超大目录时，应让 opendir 只建句柄、readdir 才碰磁盘。
         let mut entries = Vec::new();
         let mut rd = tokio::fs::read_dir(&dir).await.map_err(io_to_status)?;
         while let Some(entry) = rd.next_entry().await.map_err(io_to_status)? {
@@ -901,6 +954,10 @@ impl russh_sftp::server::Handler for SftpSessionHandler {
         // posix-rename 语义：目标存在时先移除再改名。Windows 的 MoveFile 不
         // 覆盖已存在的目标，而 sftp/FileZilla 等客户端默认按 rename(2) 期望
         // 覆盖；目录目标必须为空（与 rename(2) 一致，非空则原样报错）。
+        //
+        // 已知取舍（#7）：这是"先删后改"，不是原子替换 —— 若紧接着的
+        // rename(2) 自身失败（磁盘满、权限变化等），目标已经被删掉了。
+        // posix-rename 语义的固有窗口，与 OpenSSH 行为一致，这里不改。
         match tokio::fs::symlink_metadata(&to).await {
             Ok(meta) if meta.is_dir() => tokio::fs::remove_dir(&to).await.map_err(io_to_status)?,
             Ok(_) => tokio::fs::remove_file(&to).await.map_err(io_to_status)?,
@@ -1279,6 +1336,111 @@ mod tests {
         );
 
         let _ = rw.close(0, up).await;
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// 审查发现 #1：`len` 是对端控制的 u32，不能直接当作分配规模。
+    #[test]
+    fn read_chunk_len_caps_client_requested_sizes() {
+        assert_eq!(read_chunk_len(0), 0, "0 字节请求不应被抬成上限");
+        assert_eq!(read_chunk_len(32 * 1024), 32 * 1024, "常规客户端的 32 KiB 原样放行");
+        assert_eq!(read_chunk_len(64 * 1024), 64 * 1024);
+        assert_eq!(read_chunk_len(MAX_READ_CHUNK as u32), MAX_READ_CHUNK);
+        assert_eq!(read_chunk_len(u32::MAX), MAX_READ_CHUNK, "索要 4 GiB 也只应分到 1 MiB");
+    }
+
+    /// #1 的行为面：封顶不能改变"读到多少返回多少"的语义 —— 请求 4 GiB 时
+    /// 返回的是文件真实长度（多读截断），而不是错误或 1 MiB 的脏数据。
+    #[tokio::test]
+    async fn oversized_read_request_still_returns_the_file() {
+        use russh_sftp::server::Handler;
+        let dir = temp_dir_with("sftp-read-cap");
+        std::fs::write(dir.join("f.txt"), vec![b'x'; 4096]).unwrap();
+        let mut h = SftpSessionHandler::new(session_cfg(dir.clone(), false));
+
+        let handle = h
+            .open(0, "/f.txt".into(), OpenFlags::READ, FileAttributes::default())
+            .await
+            .expect("纯 READ 应放行")
+            .handle;
+        let data = h
+            .read(0, handle, 0, u32::MAX)
+            .await
+            .expect("超大 len 应照常读，而不是让服务端去分配 4 GiB")
+            .data;
+        assert_eq!(data.len(), 4096, "应返回真实读到的字节数，而非请求量");
+        assert!(data.iter().all(|b| *b == b'x'), "内容应完整正确");
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// #5：RW 句柄（READ|WRITE）在 Started / Progress / Done 三个事件里必须是
+    /// 同一个方向 —— 不能 open 报 Upload、read 报 Download。
+    #[tokio::test]
+    async fn rw_handle_reports_one_direction_throughout() {
+        use russh_sftp::server::Handler;
+        let dir = temp_dir_with("sftp-rw-direction");
+        std::fs::write(dir.join("f.txt"), b"0123456789").unwrap();
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        let mut h = SftpSessionHandler::new(session_cfg_with_progress(dir.clone(), false, Some(tx)));
+
+        let handle = h
+            .open(
+                0,
+                "/f.txt".into(),
+                OpenFlags::READ | OpenFlags::WRITE,
+                FileAttributes::default(),
+            )
+            .await
+            .expect("RW 打开应放行")
+            .handle;
+
+        let mut kinds = Vec::new();
+        match rx.try_recv().expect("open 应发 Started") {
+            TransferEvent::Started { kind, .. } => kinds.push(kind),
+            other => panic!("期望 Started，实际 {other:?}"),
+        }
+        // 读一个 RW 句柄：方向仍由打开方式（WRITE）决定，不能退化成 Download。
+        let _ = h.read(0, handle.clone(), 0, 4).await;
+        let _ = h.close(0, handle).await;
+        while let Ok(ev) = rx.try_recv() {
+            match ev {
+                TransferEvent::Progress { kind, .. } | TransferEvent::Done { kind, .. } => {
+                    kinds.push(kind)
+                }
+                _ => {}
+            }
+        }
+        assert!(
+            kinds.iter().all(|k| *k == TransferKind::SftpUpload),
+            "RW 句柄全程应报 Upload（与 open 一致），实际 {kinds:?}"
+        );
+        assert!(kinds.len() >= 3, "应收到 Started/Progress/Done，实际 {kinds:?}");
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// #6：空用户名会让两个认证回调都必然拒绝（门是 `!username.is_empty()`），
+    /// 必须在**启动阶段**就报错，而不是开成一个谁也进不来的服务。
+    #[tokio::test]
+    async fn empty_username_is_rejected_at_start() {
+        let dir = temp_dir_with("sftp-empty-user");
+        let (_shutdown_tx, shutdown_rx) = broadcast::channel::<()>(1);
+        let (progress_tx, _progress_rx) = tokio::sync::mpsc::unbounded_channel();
+        let cfg = SftpServerConfig {
+            bind_addr: "127.0.0.1".parse().unwrap(),
+            port: 0,
+            username: String::new(),
+            password: "p".into(),
+            authorized_keys: Vec::new(),
+            root_dir: dir.clone(),
+            read_only: false,
+        };
+        let err = start_sftp_server(cfg, &dir, shutdown_rx, progress_tx)
+            .await
+            .expect_err("空用户名必须在启动阶段被拒绝");
+        assert!(err.to_string().contains("用户名"), "错误信息应点名用户名: {err}");
+
         let _ = std::fs::remove_dir_all(&dir);
     }
 

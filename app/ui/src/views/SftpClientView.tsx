@@ -13,8 +13,12 @@ interface HostKeyPrompt {
 
 /**
  * SftpEntry → 列表行。与 FTP 客户端的 LIST 原始行不同，SFTP 拿到的是结构化
- * 条目，这里拼成同风格的短行。fileType 的具体取值以后端最终实现为准，
- * 按 dir/link 宽容匹配（骨架阶段）。
+ * 条目，这里拼成同风格的短行。
+ *
+ * `fileType` 的契约已落地为 `"file" | "dir" | "symlink" | "other"`
+ * （`crates/ftp-core/src/sftp/client.rs::SftpEntry`）。这里刻意保留前缀/子串
+ * 的宽容匹配（而不是枚举硬比对），是为了后端将来扩展取值时不至于把未知类型
+ * 渲染错 —— 未匹配上的一律按普通文件 `-` 显示。
  */
 function formatEntry(e: SftpEntry): string {
   const t = e.fileType.toLowerCase();

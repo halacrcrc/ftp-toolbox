@@ -271,8 +271,33 @@ fn upsert_known_host(app_data: &Path, host: &str, port: u16, fingerprint: &str) 
     if let Some(dir) = path.parent() {
         std::fs::create_dir_all(dir)?;
     }
-    std::fs::write(&path, lines.join("\n") + "\n")?;
-    Ok(())
+    write_known_hosts_file(&path, &(lines.join("\n") + "\n"))
+}
+
+/// Write `payload` to `path` without a window in which a crash leaves a
+/// half-written file: write a sibling temp file, then rename it over the
+/// target (`rename(2)` / `MoveFileEx` replace atomically on the platforms we
+/// ship for). Review finding #9 — the file used to be rewritten in place, so
+/// an ill-timed crash could lose *every* trusted host, not just the one being
+/// updated. Recovery would mean re-confirming each fingerprint by hand.
+///
+/// Falls back to an in-place write if the rename cannot be performed (a
+/// scanner holding the temp file, for instance): a non-atomic write still
+/// beats dropping the record.
+fn write_known_hosts_file(path: &Path, payload: &str) -> Result<()> {
+    let tmp = path.with_extension("tmp");
+    match std::fs::write(&tmp, payload).and_then(|()| std::fs::rename(&tmp, path)) {
+        Ok(()) => Ok(()),
+        Err(e) => {
+            tracing::debug!(
+                error = %e,
+                temp = %tmp.display(),
+                "atomic known_hosts write failed, falling back to an in-place write"
+            );
+            let _ = std::fs::remove_file(&tmp);
+            Ok(std::fs::write(path, payload)?)
+        }
+    }
 }
 
 #[cfg(test)]
@@ -349,6 +374,26 @@ mod tests {
             check_known_host(&dir, "example.com", 22, Some("SHA256:bbb")).status,
             HostKeyState::Unknown
         );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// #9：upsert 走"临时文件 + rename"。正常路径下不该在 keys/ 里留下 .tmp 残留，
+    /// 且内容必须是最后一次写入的结果。
+    #[test]
+    fn known_hosts_upsert_leaves_no_temp_file() {
+        let dir = tmp_dir("atomic");
+        record_known_host(&dir, "example.com", 22, "SHA256:aaa").unwrap();
+        update_known_host(&dir, "example.com", 22, "SHA256:bbb").unwrap();
+        assert_eq!(lookup_known_host(&dir, "example.com", 22).as_deref(), Some("SHA256:bbb"));
+
+        let leftovers: Vec<String> = std::fs::read_dir(keys_dir(&dir))
+            .unwrap()
+            .filter_map(|e| e.ok())
+            .map(|e| e.file_name().to_string_lossy().into_owned())
+            .filter(|n| n.ends_with(".tmp"))
+            .collect();
+        assert!(leftovers.is_empty(), "原子写不应留下临时文件: {leftovers:?}");
+
         let _ = std::fs::remove_dir_all(&dir);
     }
 

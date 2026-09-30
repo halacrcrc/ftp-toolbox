@@ -95,6 +95,26 @@ enum HostKeyDecision {
 /// satisfies all three.
 type SshResult<T> = std::result::Result<T, russh::Error>;
 
+/// Timeout for the short-lived fingerprint probe. The probe *is* the
+/// handshake — connect, read the host key, disconnect — so an
+/// `inactivity_timeout` on the client config is exactly the right instrument
+/// here.
+const PROBE_TIMEOUT: Duration = Duration::from_secs(10);
+
+/// Budget for the whole [`SftpClient::connect`] sequence: transport handshake
+/// → password auth → session channel → sftp subsystem (review finding #2).
+///
+/// Deliberately a *deadline around connect* rather than an
+/// `inactivity_timeout` in the client config: that setting lives in russh's
+/// session task for the **entire** connection, and this app keeps one
+/// long-lived `SftpClient` in `AppState` across separate UI commands — a
+/// session sitting idle while the user picks a local file is healthy, but a
+/// 10 s inactivity timer would silently kill it mid-session (the client
+/// sends no keepalives to hold the timer open). A deadline bounds precisely
+/// the failure the finding describes — a black-hole or half-dead server that
+/// never answers the handshake — and leaves the established session alone.
+const CONNECT_TIMEOUT: Duration = Duration::from_secs(15);
+
 /// russh client handler enforcing TOFU (§2.4): known+match passes silently;
 /// unknown needs `trust_new_host` (and is then recorded); changed always
 /// rejects. `accept_any` is used by the fingerprint probe, which must look
@@ -190,7 +210,7 @@ impl SftpClient {
         let handler = TofuHandler::for_probe();
         let presented = Arc::clone(&handler.presented);
         let config = Arc::new(russh::client::Config {
-            inactivity_timeout: Some(Duration::from_secs(10)),
+            inactivity_timeout: Some(PROBE_TIMEOUT),
             ..Default::default()
         });
         let session = russh::client::connect(config, (host, port), handler)
@@ -212,7 +232,30 @@ impl SftpClient {
     /// `trust_new_host` → [`ConnectError::UnknownHostKey`]; `changed` →
     /// [`ConnectError::ChangedHostKey`] *always* (updates only happen
     /// through the explicit update command).
+    ///
+    /// Bounded by [`CONNECT_TIMEOUT`] so a server that accepts the TCP
+    /// connection but never speaks SSH cannot park the caller (and the UI's
+    /// busy state) forever.
     pub async fn connect(
+        cfg: SftpClientConfig,
+        app_data: &Path,
+        trust_new_host: bool,
+    ) -> std::result::Result<Self, ConnectError> {
+        let target = format!("{}:{}", cfg.host, cfg.port);
+        let connecting = Self::connect_inner(cfg, app_data, trust_new_host);
+        match tokio::time::timeout(CONNECT_TIMEOUT, connecting).await {
+            Ok(result) => result,
+            Err(_) => Err(ConnectError::Core(Error::Config(format!(
+                "连接 {target} 超时：{secs} 秒内没有完成 SSH 握手与登录\
+                 （服务器无响应、连接被防火墙丢弃，或地址不可达）",
+                secs = CONNECT_TIMEOUT.as_secs()
+            )))),
+        }
+    }
+
+    /// The connect sequence proper; [`SftpClient::connect`] only adds a
+    /// deadline around it (see [`CONNECT_TIMEOUT`]).
+    async fn connect_inner(
         cfg: SftpClientConfig,
         app_data: &Path,
         trust_new_host: bool,
@@ -596,5 +639,44 @@ mod tests {
         let rendered = sftp_io_err(io).to_string();
         assert!(rendered.contains("no such local file"), "{rendered}");
         assert!(!rendered.contains("SFTP 会话错误"), "{rendered}");
+    }
+
+    /// #2 的回归面：给 connect 加超时，不能把"本来就该立刻失败"的情况
+    /// 拖成一次超时。连一个确定没人监听的地址必须马上返回错误。
+    #[tokio::test]
+    async fn refused_connection_fails_fast_instead_of_timing_out() {
+        // 先占一个端口再立刻释放，保证地址真的无人监听（不依赖外部端口状态）。
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        drop(listener);
+
+        let app_data =
+            std::env::temp_dir().join(format!("ftp-core-sftp-refused-{}", std::process::id()));
+        let _ = std::fs::create_dir_all(&app_data);
+        let started = std::time::Instant::now();
+        // `SftpClient` 未实现 Debug，不能用 expect_err（它要求 Ok 侧可 Debug）。
+        let err = match SftpClient::connect(
+            SftpClientConfig {
+                host: "127.0.0.1".into(),
+                port,
+                username: "u".into(),
+                password: "p".into(),
+            },
+            &app_data,
+            false,
+        )
+        .await
+        {
+            Ok(_) => panic!("无人监听的端口应连接失败"),
+            Err(e) => e,
+        };
+        assert!(
+            started.elapsed() < CONNECT_TIMEOUT,
+            "被拒绝的连接应立刻失败，而不是等到超时：{:?}",
+            started.elapsed()
+        );
+        assert!(!err.to_string().contains("超时"), "被拒绝的连接不应报超时: {err}");
+
+        let _ = std::fs::remove_dir_all(&app_data);
     }
 }

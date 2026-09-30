@@ -92,10 +92,19 @@ ui/node_modules/.bin/tauri build
 
 ```bash
 cargo test -p ftp-core   # 引擎全部单测 + 回环集成测试
+
+cd app/ui
+npm test                 # 前端纯逻辑单测（Node 内置测试运行器，无需额外依赖）
+npm run typecheck        # tsc --noEmit
 ```
 
 回环测试会起真实服务端再用内置客户端互传：FTP / FTPS / TFTP 各一组，SFTP 一组
 （首连信任 → 列目录 → 上传下载 → 只读拒绝 → 主机密钥变更拒绝）。
+
+前端单测只覆盖 `src/lib/` 下的纯逻辑（字节数格式化、速度 EMA、日志文案）。
+它用的是 Node 22+ 自带的 `node --test`（直接加载 `.ts`，无需 vitest/jest），
+所以 `src/lib/*` 里的 import 必须带 `.ts` 后缀 —— Node 的 ESM 解析器不做扩展名
+补全，Vite 打包则不受影响。
 
 设计规格与决策记录放在 `docs/`，例如 SFTP 的 Q1–Q12 决策见 `docs/sftp-design.md`。
 

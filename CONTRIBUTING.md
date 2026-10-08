@@ -74,12 +74,27 @@ subject 一行说清做了什么，正文可分节展开动机与取舍。
 
 ## 版本号
 
-发版时四处必须同步，缺一处会导致产物版本与界面显示不一致：
+发版时**五处**必须同步，缺一处会导致产物版本与界面显示不一致：
 
 - `app/src-tauri/tauri.conf.json`
 - `app/src-tauri/Cargo.toml`
 - `crates/ftp-core/Cargo.toml`
 - `app/ui/package.json`
+- `README.md` 下载段里的安装包文件名
+
+同版本号重复出 MSI 会触发覆盖安装错误（1638），版本号只进不退。
+
+## 代码审查
+
+审查标准与流程见 [`docs/code-review.md`](docs/code-review.md)，要点：
+
+- 提交前四条命令全绿（`cargo test -p ftp-core`、`cargo check --workspace`、
+  `npm test`、`npm run typecheck`）；
+- 代码提交逐文件过一遍该文档的**红线清单**（IPC camelCase、`.ts` 后缀、
+  JSX 空白陷阱、生命周期约定等，均有历史教训）；
+- 发版走**门禁**：版本 5 处同步 + 产物元数据核对 + **先提交再发版**；
+- 审查发现按 `#N` 编号，整改与复验记录在 `deliverables/software-company/`，
+  未复验的整改不算闭环。
 
 ## 几点容易踩的坑
 

@@ -53,7 +53,7 @@ Windows 安装包见 [Releases](https://github.com/halacrcrc/ftp-toolbox/release
 crates/ftp-core    核心引擎（纯 tokio，不依赖任何 GUI）
   src/ftp/         FTP server（libunftp）+ client（suppaftp），FTPS 证书（自签）
   src/sftp/        SFTP server + client（russh + russh-sftp），主机密钥与 TOFU
-  src/tftp/        TFTP（RFC 1350 + RFC 2348）server + client，自实现
+  src/tftp/        TFTP（RFC 1350 + RFC 2347/2348/2349）server + client，自实现
 app/src-tauri      Tauri v2 壳：命令层 + 进度/日志事件转发
 app/ui             React 前端（Vite + TypeScript）
 ```

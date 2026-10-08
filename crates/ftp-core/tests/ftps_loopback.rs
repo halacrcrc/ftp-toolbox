@@ -91,7 +91,7 @@ async fn ftps_roundtrip_upload_download() {
     )
     .await
     .unwrap();
-    client.upload(&src, "payload.bin", None).await.unwrap();
+    client.upload(&src, "payload.bin", None, None).await.unwrap();
     assert!(
         wait_for_sessions(&handle, 1).await,
         "上传期间应保持一个会话"
@@ -99,7 +99,7 @@ async fn ftps_roundtrip_upload_download() {
 
     // Download back and compare.
     let dst = temp_dir("roundtrip-dst").join("payload.bin");
-    client.download("payload.bin", &dst, None).await.unwrap();
+    client.download("payload.bin", &dst, None, None).await.unwrap();
     let got = std::fs::read(&dst).unwrap();
     assert_eq!(got.len(), bytes.len(), "下载长度不一致");
     assert!(got == bytes, "下载内容不一致");

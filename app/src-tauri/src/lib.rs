@@ -3,6 +3,7 @@
 //! lifecycles (server handles, the connected FTP client) and forward
 //! progress events to the frontend.
 
+use std::collections::HashMap;
 use std::net::IpAddr;
 use std::ops::Range;
 use std::path::PathBuf;
@@ -37,6 +38,26 @@ struct AppState {
     /// The single connected SFTP client session (same reasoning as above;
     /// TOFU 信任状态在磁盘 known_hosts，不在这里).
     sftp_client: AsyncMutex<Option<SftpClient>>,
+    /// In-flight transfer cancellation tokens, keyed by the frontend-generated
+    /// transfer id. std mutex: register/cancel never await. Entries are
+    /// removed when the transfer command finishes (成功或失败都会摘除).
+    cancels: Mutex<HashMap<String, ftp_core::CancellationToken>>,
+}
+
+/// Register a fresh cancellation token for `transfer_id`; the command removes
+/// it when the transfer settles (see [`unregister_cancel`]).
+fn register_cancel(state: &AppState, transfer_id: &str) -> ftp_core::CancellationToken {
+    let token = ftp_core::CancellationToken::new();
+    if let Ok(mut m) = state.cancels.lock() {
+        m.insert(transfer_id.to_string(), token.clone());
+    }
+    token
+}
+
+fn unregister_cancel(state: &AppState, transfer_id: &str) {
+    if let Ok(mut m) = state.cancels.lock() {
+        m.remove(transfer_id);
+    }
 }
 
 type CmdResult<T> = Result<T, String>;
@@ -658,15 +679,24 @@ async fn ftp_upload(
     state: State<'_, AppState>,
     local: String,
     remote: String,
+    transfer_id: Option<String>,
 ) -> CmdResult<String> {
     let tx = progress_forwarder(&app);
-    let mut guard = state.ftp_client.lock().await;
-    let client = guard.as_mut().ok_or("未连接 FTP 服务器")?;
-    client
-        .upload(std::path::Path::new(&local), &remote, Some(tx))
-        .await
-        .map_err(err)?;
-    Ok(format!("上传完成: {remote}"))
+    let token = transfer_id.as_deref().map(|id| register_cancel(&state, id));
+    let result = async {
+        let mut guard = state.ftp_client.lock().await;
+        let client = guard.as_mut().ok_or("未连接 FTP 服务器")?;
+        client
+            .upload(std::path::Path::new(&local), &remote, Some(tx), token)
+            .await
+            .map_err(err)?;
+        Ok(format!("上传完成: {remote}"))
+    }
+    .await;
+    if let Some(id) = transfer_id.as_deref() {
+        unregister_cancel(&state, id);
+    }
+    result
 }
 
 #[tauri::command]
@@ -675,15 +705,24 @@ async fn ftp_download(
     state: State<'_, AppState>,
     remote: String,
     local: String,
+    transfer_id: Option<String>,
 ) -> CmdResult<String> {
     let tx = progress_forwarder(&app);
-    let mut guard = state.ftp_client.lock().await;
-    let client = guard.as_mut().ok_or("未连接 FTP 服务器")?;
-    client
-        .download(&remote, std::path::Path::new(&local), Some(tx))
-        .await
-        .map_err(err)?;
-    Ok(format!("下载完成: {remote}"))
+    let token = transfer_id.as_deref().map(|id| register_cancel(&state, id));
+    let result = async {
+        let mut guard = state.ftp_client.lock().await;
+        let client = guard.as_mut().ok_or("未连接 FTP 服务器")?;
+        client
+            .download(&remote, std::path::Path::new(&local), Some(tx), token)
+            .await
+            .map_err(err)?;
+        Ok(format!("下载完成: {remote}"))
+    }
+    .await;
+    if let Some(id) = transfer_id.as_deref() {
+        unregister_cancel(&state, id);
+    }
+    result
 }
 
 // ---------- TFTP client ----------
@@ -691,29 +730,77 @@ async fn ftp_download(
 #[tauri::command]
 async fn tftp_upload(
     app: AppHandle,
+    state: State<'_, AppState>,
     server: String,
     local: String,
     remote: String,
+    transfer_id: Option<String>,
 ) -> CmdResult<String> {
     let tx = progress_forwarder(&app);
-    ftp_core::tftp::put(&server, std::path::Path::new(&local), &remote, Some(tx))
-        .await
-        .map_err(err)?;
-    Ok(format!("上传完成: {remote}"))
+    let token = transfer_id.as_deref().map(|id| register_cancel(&state, id));
+    let result = ftp_core::tftp::put(
+        &server,
+        std::path::Path::new(&local),
+        &remote,
+        Some(tx),
+        token,
+    )
+    .await
+    .map(|_| format!("上传完成: {remote}"))
+    .map_err(err);
+    if let Some(id) = transfer_id.as_deref() {
+        unregister_cancel(&state, id);
+    }
+    result
 }
 
 #[tauri::command]
 async fn tftp_download(
     app: AppHandle,
+    state: State<'_, AppState>,
     server: String,
     remote: String,
     local: String,
+    transfer_id: Option<String>,
 ) -> CmdResult<String> {
     let tx = progress_forwarder(&app);
-    ftp_core::tftp::get(&server, &remote, std::path::Path::new(&local), Some(tx))
-        .await
-        .map_err(err)?;
-    Ok(format!("下载完成: {remote}"))
+    let token = transfer_id.as_deref().map(|id| register_cancel(&state, id));
+    let result = ftp_core::tftp::get(
+        &server,
+        &remote,
+        std::path::Path::new(&local),
+        Some(tx),
+        token,
+    )
+    .await
+    .map(|_| format!("下载完成: {remote}"))
+    .map_err(err);
+    if let Some(id) = transfer_id.as_deref() {
+        unregister_cancel(&state, id);
+    }
+    result
+}
+
+/// Abort an in-flight transfer by its id. The engine checks the token between
+/// chunks, so the abort lands within one chunk (64 KiB for FTP/SFTP, one TFTP
+/// block) rather than at some arbitrary later point.
+#[tauri::command]
+async fn cancel_transfer(
+    state: State<'_, AppState>,
+    transfer_id: String,
+) -> CmdResult<String> {
+    let token = state
+        .cancels
+        .lock()
+        .map_err(err)?
+        .remove(&transfer_id);
+    match token {
+        Some(t) => {
+            t.cancel();
+            Ok("已请求取消传输".into())
+        }
+        None => Err("没有找到该传输（可能已完成或已取消）".into()),
+    }
 }
 
 // ---------- SFTP（契约：docs/sftp-design.md §3；线格式见 app/ui/src/api.ts） ----------
@@ -1007,15 +1094,24 @@ async fn sftp_client_upload(
     state: State<'_, AppState>,
     local_path: String,
     remote_path: String,
+    transfer_id: Option<String>,
 ) -> CmdResult<String> {
     let tx = progress_forwarder(&app);
-    let guard = state.sftp_client.lock().await;
-    let client = guard.as_ref().ok_or("未连接 SFTP 服务器")?;
-    client
-        .upload_file(std::path::Path::new(&local_path), &remote_path, Some(tx))
-        .await
-        .map_err(err)?;
-    Ok(format!("上传完成: {remote_path}"))
+    let token = transfer_id.as_deref().map(|id| register_cancel(&state, id));
+    let result = async {
+        let guard = state.sftp_client.lock().await;
+        let client = guard.as_ref().ok_or("未连接 SFTP 服务器")?;
+        client
+            .upload_file(std::path::Path::new(&local_path), &remote_path, Some(tx), token)
+            .await
+            .map_err(err)?;
+        Ok(format!("上传完成: {remote_path}"))
+    }
+    .await;
+    if let Some(id) = transfer_id.as_deref() {
+        unregister_cancel(&state, id);
+    }
+    result
 }
 
 #[tauri::command]
@@ -1024,15 +1120,24 @@ async fn sftp_client_download(
     state: State<'_, AppState>,
     remote_path: String,
     local_path: String,
+    transfer_id: Option<String>,
 ) -> CmdResult<String> {
     let tx = progress_forwarder(&app);
-    let guard = state.sftp_client.lock().await;
-    let client = guard.as_ref().ok_or("未连接 SFTP 服务器")?;
-    client
-        .download_file(&remote_path, std::path::Path::new(&local_path), Some(tx))
-        .await
-        .map_err(err)?;
-    Ok(format!("下载完成: {remote_path}"))
+    let token = transfer_id.as_deref().map(|id| register_cancel(&state, id));
+    let result = async {
+        let guard = state.sftp_client.lock().await;
+        let client = guard.as_ref().ok_or("未连接 SFTP 服务器")?;
+        client
+            .download_file(&remote_path, std::path::Path::new(&local_path), Some(tx), token)
+            .await
+            .map_err(err)?;
+        Ok(format!("下载完成: {remote_path}"))
+    }
+    .await;
+    if let Some(id) = transfer_id.as_deref() {
+        unregister_cancel(&state, id);
+    }
+    result
 }
 
 /// 主机密钥变化后，用户显式确认才允许覆盖 known_hosts 记录（§2.4）。
@@ -1304,6 +1409,7 @@ pub fn run() {
             sftp_client_download,
             sftp_client_update_known_host,
             sftp_client_clear_known_hosts,
+            cancel_transfer,
             list_interfaces,
         ])
         .run(tauri::generate_context!())

@@ -142,6 +142,23 @@ pub fn negotiated_blksize(options: &[(String, String)]) -> Option<usize> {
         .map(|b| b.clamp(MIN_BLKSIZE, MAX_BLKSIZE))
 }
 
+/// Extract the tsize value from an option list (case-insensitive, RFC 2349).
+///
+/// In an RRQ the client sends `tsize=0` ("tell me the size"); the OACK answer
+/// carries the real byte count. Both directions just need the raw number —
+/// no clamping, a 0 means the peer did not volunteer a size.
+pub fn negotiated_tsize(options: &[(String, String)]) -> Option<u64> {
+    options
+        .iter()
+        .find(|(k, _)| k.eq_ignore_ascii_case("tsize"))
+        .and_then(|(_, v)| v.parse::<u64>().ok())
+}
+
+/// True when the request asks for tsize negotiation at all (any value).
+pub fn requests_tsize(options: &[(String, String)]) -> bool {
+    options.iter().any(|(k, _)| k.eq_ignore_ascii_case("tsize"))
+}
+
 fn push_z(out: &mut Vec<u8>, s: &str) {
     out.extend_from_slice(s.as_bytes());
     out.push(0);
@@ -225,5 +242,24 @@ mod tests {
         assert_eq!(negotiated_blksize(&opts), Some(MIN_BLKSIZE));
         let opts = vec![("tsize".to_string(), "0".to_string())];
         assert_eq!(negotiated_blksize(&opts), None);
+    }
+
+    #[test]
+    fn tsize_negotiation_parses() {
+        // request form and answer form both parse
+        assert_eq!(
+            negotiated_tsize(&[("tsize".to_string(), "0".to_string())]),
+            Some(0)
+        );
+        assert_eq!(
+            negotiated_tsize(&[("TSize".to_string(), "123456".to_string())]),
+            Some(123456)
+        );
+        // non-numeric / absent -> None
+        assert_eq!(negotiated_tsize(&[("tsize".to_string(), "abc".to_string())]), None);
+        assert_eq!(negotiated_tsize(&[("blksize".to_string(), "8192".to_string())]), None);
+        // presence detection independent of parseability
+        assert!(requests_tsize(&[("TSIZE".to_string(), "junk".to_string())]));
+        assert!(!requests_tsize(&[("blksize".to_string(), "512".to_string())]));
     }
 }

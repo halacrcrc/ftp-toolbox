@@ -10,7 +10,7 @@ use tokio::sync::{broadcast, watch};
 use tokio::task::JoinHandle;
 use tracing::{error, info, warn};
 
-use super::packet::{negotiated_blksize, Packet};
+use super::packet::{negotiated_blksize, negotiated_tsize, requests_tsize, Packet};
 use super::{BLOCK_SIZE, MAX_RETRIES, MAX_UPLOAD_BYTES, TIMEOUT};
 use crate::error::{Error, Result};
 use crate::lifecycle::{ServerShared, ServerState};
@@ -154,25 +154,60 @@ async fn handle_session(root: Arc<PathBuf>, peer: SocketAddr, first: Packet) -> 
     match first {
         Packet::Rrq { filename, options, .. } => {
             let blksize = negotiated_blksize(&options);
+            let want_tsize = requests_tsize(&options);
             let effective = blksize.unwrap_or(BLOCK_SIZE);
             info!(%peer, file = %filename, blksize = effective, "tftp RRQ: client wants to download");
+            // The file is always opened before the handshake: tsize needs the
+            // real byte count for the OACK, and a missing file must surface as
+            // a proper ERROR packet rather than an OACK followed by failure.
+            let opened = match open_rrq(&root, &filename).await {
+                Ok(v) => v,
+                Err((code, msg, err)) => {
+                    send_error(&sock, code, &msg).await;
+                    return Err(err);
+                }
+            };
+            let mut oack_opts: Vec<(String, String)> = Vec::new();
             if let Some(b) = blksize {
-                // RFC 2348: answer with OACK naming the accepted value,
+                oack_opts.push(("blksize".into(), b.to_string()));
+            }
+            if want_tsize {
+                oack_opts.push(("tsize".into(), opened.2.to_string()));
+            }
+            if !oack_opts.is_empty() {
+                // RFC 2347/2349: answer with OACK naming the accepted values,
                 // client confirms with ACK(0) before we send DATA(1).
-                let oack =
-                    Packet::Oack { options: vec![("blksize".into(), b.to_string())] }.encode();
+                let oack = Packet::Oack { options: oack_opts }.encode();
                 sock.send(&oack).await?;
                 await_ack(&sock, 0, &oack, BLOCK_SIZE).await?;
             }
-            send_file(&sock, &root, &filename, effective).await
+            send_file(&sock, opened, effective).await
         }
         Packet::Wrq { filename, options, .. } => {
             let blksize = negotiated_blksize(&options);
             let effective = blksize.unwrap_or(BLOCK_SIZE);
             info!(%peer, file = %filename, blksize = effective, "tftp WRQ: client wants to upload");
-            let first_reply = match blksize {
-                Some(b) => Packet::Oack { options: vec![("blksize".into(), b.to_string())] }.encode(),
-                None => Packet::Ack { block: 0 }.encode(),
+            // A declared size above the cumulative cap can be rejected before
+            // any DATA block arrives (error 3 = disk full / allocation exceeded).
+            if let Some(declared) = negotiated_tsize(&options) {
+                if declared > MAX_UPLOAD_BYTES {
+                    send_error(&sock, 3, "Upload exceeds the 4 GiB limit").await;
+                    return Err(Error::TftpProtocol(format!(
+                        "WRQ rejected: {filename} 声明的大小超过单次上传上限 {MAX_UPLOAD_BYTES} 字节"
+                    )));
+                }
+            }
+            let mut oack_opts: Vec<(String, String)> = Vec::new();
+            if let Some(b) = blksize {
+                oack_opts.push(("blksize".into(), b.to_string()));
+            }
+            if let Some(declared) = negotiated_tsize(&options) {
+                oack_opts.push(("tsize".into(), declared.to_string()));
+            }
+            let first_reply = if oack_opts.is_empty() {
+                Packet::Ack { block: 0 }.encode()
+            } else {
+                Packet::Oack { options: oack_opts }.encode()
             };
             recv_file(&sock, &root, &filename, effective, first_reply).await
         }
@@ -251,20 +286,31 @@ async fn await_data(sock: &UdpSocket, want: u16, last: &[u8], blksize: usize) ->
     Err(Error::Timeout)
 }
 
-async fn send_file(sock: &UdpSocket, root: &Path, name: &str, blksize: usize) -> Result<()> {
-    let path = resolve(root, name)?;
-    let mut file = match File::open(&path).await {
-        Ok(f) => f,
+/// Resolve + open a file for a RRQ that negotiated tsize. The `Err` payload
+/// carries the ERROR-packet code, its message and the engine error in one
+/// tuple, so the caller can reject the transfer before the OACK handshake.
+async fn open_rrq(
+    root: &Path,
+    name: &str,
+) -> std::result::Result<(PathBuf, File, u64), (u16, String, Error)> {
+    let path = resolve(root, name).map_err(|e| (2u16, "Access violation".to_string(), e))?;
+    match File::open(&path).await {
+        Ok(file) => {
+            let size = file.metadata().await.map_err(|e| {
+                (2u16, "Access violation".to_string(), Error::Io(e))
+            })?.len();
+            Ok((path, file, size))
+        }
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-            send_error(sock, 1, "File not found").await;
-            return Err(Error::Io(e));
+            Err((1, "File not found".to_string(), Error::Io(e)))
         }
-        Err(e) => {
-            send_error(sock, 2, "Access violation").await;
-            return Err(Error::Io(e));
-        }
-    };
+        Err(e) => Err((2, "Access violation".to_string(), Error::Io(e))),
+    }
+}
 
+/// Stream an already-opened file to the client (opened by [`open_rrq`]).
+async fn send_file(sock: &UdpSocket, opened: (PathBuf, File, u64), blksize: usize) -> Result<()> {
+    let (name, mut file, _) = opened;
     let mut block: u16 = 1;
     let mut buf = vec![0u8; blksize];
     let started = Instant::now();
@@ -277,7 +323,7 @@ async fn send_file(sock: &UdpSocket, root: &Path, name: &str, blksize: usize) ->
         total += n as u64;
         if n < blksize {
             info!(
-                file = %name, bytes = total, blocks = block,
+                file = %name.display(), bytes = total, blocks = block,
                 elapsed_ms = started.elapsed().as_millis(),
                 "tftp send complete"
             );

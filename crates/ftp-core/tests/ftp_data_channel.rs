@@ -36,7 +36,7 @@ async fn round_trip_once(attempt: u32) -> Result<(), String> {
             .await
             .map_err(|e| e.to_string())?;
         client
-            .upload(&local_up, "big.bin", None)
+            .upload(&local_up, "big.bin", None, None)
             .await
             .map_err(|e| e.to_string())?;
 
@@ -47,7 +47,7 @@ async fn round_trip_once(attempt: u32) -> Result<(), String> {
 
         let local_down = temp_path("pasv-down", attempt);
         client
-            .download("big.bin", &local_down, None)
+            .download("big.bin", &local_down, None, None)
             .await
             .map_err(|e| e.to_string())?;
         let downloaded = std::fs::read(&local_down).map_err(|e| e.to_string())?;

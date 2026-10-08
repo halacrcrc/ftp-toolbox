@@ -1,24 +1,37 @@
 import { useState } from "react";
-import { api, pathBase } from "../api";
+import { api, newTransferId, pathBase } from "../api";
 import LocalFileField from "../components/LocalFileField";
 import { LogEntry } from "../App";
 
 type Log = (text: string, level?: LogEntry["level"]) => void;
 
-export default function TftpClientView({ log }: { log: Log }) {
+/** 传输开始/结束时上报取消令牌 id（App 据此启用进度条上的「取消」按钮）。 */
+type TransferChange = (id: string | null) => void;
+
+export default function TftpClientView({
+  log,
+  onTransferChange,
+}: {
+  log: Log;
+  onTransferChange?: TransferChange;
+}) {
   const [server, setServer] = useState("127.0.0.1:6969");
   const [local, setLocal] = useState("C:\\tftp-root\\hello.txt");
   const [remote, setRemote] = useState("hello.txt");
 
   const transfer = async (kind: "upload" | "download") => {
+    const transferId = newTransferId();
+    onTransferChange?.(transferId);
     try {
       const msg =
         kind === "upload"
-          ? await api.tftpUpload(server, local, remote)
-          : await api.tftpDownload(server, remote, local);
+          ? await api.tftpUpload(server, local, remote, transferId)
+          : await api.tftpDownload(server, remote, local, transferId);
       log(msg, "ok");
     } catch (e) {
       log(`${kind === "upload" ? "上传" : "下载"}失败: ${e}`, "error");
+    } finally {
+      onTransferChange?.(null);
     }
   };
 

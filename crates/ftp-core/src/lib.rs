@@ -9,6 +9,7 @@
 //! - [`net`]: pure helpers deciding whether a NIC is usable as a listen address
 //! - [`tls`]: self-signed certificate generation for FTPS
 
+pub mod cancel;
 pub mod error;
 pub mod ftp;
 pub mod lifecycle;
@@ -19,6 +20,7 @@ pub mod sftp;
 pub mod tls;
 pub mod tftp;
 
+pub use cancel::CancellationToken;
 pub use error::{BindCause, Error, Result};
 pub use lifecycle::{ServerShared, ServerState};
 pub use log_fields::event_parts;

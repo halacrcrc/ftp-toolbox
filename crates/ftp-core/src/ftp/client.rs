@@ -1,13 +1,11 @@
 use std::path::{Path, PathBuf};
-use std::pin::Pin;
-use std::task::{Context, Poll};
 
-use futures::io::AsyncReadExt;
+use futures::io::{AsyncReadExt, AsyncWriteExt};
 use suppaftp::{AsyncNativeTlsConnector, AsyncNativeTlsFtpStream};
 use tokio::fs::File;
-use tokio::io::AsyncWriteExt;
-use tokio_util::compat::TokioAsyncReadCompatExt;
+use tokio::io::{AsyncReadExt as TokioAsyncReadExt, AsyncWriteExt as TokioAsyncWriteExt};
 
+use crate::cancel::{self, CancellationToken};
 use crate::error::{Error, Result};
 use crate::progress::{ProgressTx, TransferEvent, TransferKind};
 
@@ -79,13 +77,19 @@ impl FtpClient {
     }
 
     /// Upload `local` to `remote`, reporting progress through `progress`.
+    ///
+    /// Driven as an explicit chunk loop over `put_with_stream` (instead of
+    /// suppaftp's all-in-one `put_file`) so that `cancel` is honoured between
+    /// chunks and every chunk operation is bounded by the idle timeout —
+    /// a wedged data channel must not hold the client session mutex forever.
     pub async fn upload(
         &mut self,
         local: &Path,
         remote: &str,
         progress: Option<ProgressTx>,
+        cancel: Option<CancellationToken>,
     ) -> Result<()> {
-        let file = File::open(local).await?;
+        let mut file = File::open(local).await?;
         let total = file.metadata().await?.len();
         let name = remote.to_string();
         TransferEvent::emit(
@@ -97,28 +101,72 @@ impl FtpClient {
             },
         );
 
-        // Bridge tokio::fs::File -> futures-io AsyncRead, then count bytes.
-        let mut reader =
-            ProgressReader::new(file.compat(), total, TransferKind::Upload, name.clone(), progress.clone());
-        self.stream.put_file(remote, &mut reader).await?;
+        let mut data = self.stream.put_with_stream(remote).await?;
+        let mut buf = vec![0u8; 64 * 1024];
+        let mut sent: u64 = 0;
+        let result: Result<()> = loop {
+            if let Err(e) = cancel::check(cancel.as_ref()) {
+                break Err(e);
+            }
+            let n = match cancel::chunk(cancel.as_ref(), file.read(&mut buf)).await {
+                Ok(r) => r?,
+                Err(e) => break Err(e),
+            };
+            if n == 0 {
+                break Ok(());
+            }
+            if let Err(e) = cancel::chunk(cancel.as_ref(), data.write_all(&buf[..n])).await {
+                break Err(e);
+            }
+            sent += n as u64;
+            TransferEvent::emit(
+                &progress,
+                TransferEvent::Progress {
+                    kind: TransferKind::Upload,
+                    file: name.clone(),
+                    bytes: sent,
+                    total: Some(total),
+                },
+            );
+        };
 
-        TransferEvent::emit(
-            &progress,
-            TransferEvent::Done {
-                kind: TransferKind::Upload,
-                file: name,
-                bytes: reader.sent(),
-            },
-        );
-        Ok(())
+        match result {
+            Ok(()) => {
+                // Must run even on the n == 0 path: without the finalise the
+                // server never sees the end-of-data marker.
+                self.stream.finalize_put_stream(data).await?;
+                TransferEvent::emit(
+                    &progress,
+                    TransferEvent::Done {
+                        kind: TransferKind::Upload,
+                        file: name,
+                        bytes: sent,
+                    },
+                );
+                Ok(())
+            }
+            Err(e) => {
+                // Abort the data channel promptly; dropping without close
+                // would leave the server waiting for more data until its own
+                // timeout. The control connection survives, but the session
+                // state after an aborted transfer is server-defined — the UI
+                // treats a cancelled upload as "reconnect if next command
+                // misbehaves".
+                let _ = data.close().await;
+                Err(e)
+            }
+        }
     }
 
     /// Download `remote` to `local`, reporting progress through `progress`.
+    /// `cancel` aborts between chunks; each chunk read is bounded by the
+    /// idle timeout.
     pub async fn download(
         &mut self,
         remote: &str,
         local: &Path,
         progress: Option<ProgressTx>,
+        cancel: Option<CancellationToken>,
     ) -> Result<()> {
         let name = remote.to_string();
         // Ask for the size up front so the progress bar can show a real
@@ -148,7 +196,17 @@ impl FtpClient {
             let mut buf = vec![0u8; 64 * 1024];
             let mut received: u64 = 0;
             loop {
-                let n = data.read(&mut buf).await?;
+                if let Err(e) = cancel::check(cancel.as_ref()) {
+                    let _ = data.close().await;
+                    return Err(e);
+                }
+                let n = match cancel::chunk(cancel.as_ref(), data.read(&mut buf)).await {
+                    Ok(r) => r?,
+                    Err(e) => {
+                        let _ = data.close().await;
+                        return Err(e);
+                    }
+                };
                 if n == 0 {
                     break;
                 }
@@ -230,47 +288,3 @@ fn tls_host(addr: &str) -> Result<&str> {
     Ok(host)
 }
 
-/// futures-io AsyncRead wrapper that counts bytes and emits progress events.
-struct ProgressReader<R> {
-    inner: R,
-    sent: u64,
-    total: u64,
-    kind: TransferKind,
-    file: String,
-    tx: Option<ProgressTx>,
-}
-
-impl<R> ProgressReader<R> {
-    fn new(inner: R, total: u64, kind: TransferKind, file: String, tx: Option<ProgressTx>) -> Self {
-        Self { inner, sent: 0, total, kind, file, tx }
-    }
-
-    fn sent(&self) -> u64 {
-        self.sent
-    }
-}
-
-impl<R: futures::io::AsyncRead + Unpin> futures::io::AsyncRead for ProgressReader<R> {
-    fn poll_read(
-        mut self: Pin<&mut Self>,
-        cx: &mut Context<'_>,
-        buf: &mut [u8],
-    ) -> Poll<std::io::Result<usize>> {
-        let result = Pin::new(&mut self.inner).poll_read(cx, buf);
-        if let Poll::Ready(Ok(n)) = &result {
-            if *n > 0 {
-                self.sent += *n as u64;
-                TransferEvent::emit(
-                    &self.tx,
-                    TransferEvent::Progress {
-                        kind: self.kind,
-                        file: self.file.clone(),
-                        bytes: self.sent,
-                        total: Some(self.total),
-                    },
-                );
-            }
-        }
-        result
-    }
-}

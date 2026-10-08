@@ -133,7 +133,7 @@ async fn sftp_roundtrip_upload_download() {
     let src = src_dir.join("payload.bin");
     let bytes = payload(1, 1024 * 1024);
     std::fs::write(&src, &bytes).unwrap();
-    client.upload_file(&src, "/payload.bin", None).await.unwrap();
+    client.upload_file(&src, "/payload.bin", None, None).await.unwrap();
 
     let listed = client.list("/").await.unwrap();
     let entry = listed
@@ -147,7 +147,7 @@ async fn sftp_roundtrip_upload_download() {
     // Download back and compare byte for byte.
     let dst_dir = temp_dir("roundtrip-dst");
     let dst = dst_dir.join("payload.bin");
-    client.download_file("/payload.bin", &dst, None).await.unwrap();
+    client.download_file("/payload.bin", &dst, None, None).await.unwrap();
     let got = std::fs::read(&dst).unwrap();
     assert_eq!(got.len(), bytes.len(), "下载长度不一致");
     assert!(got == bytes, "下载内容不一致");
@@ -295,7 +295,7 @@ async fn sftp_read_only_rejects_writes() {
     );
     let dst_dir = temp_dir("readonly-dst");
     let dst = dst_dir.join("seed.txt");
-    client.download_file("/seed.txt", &dst, None).await.unwrap();
+    client.download_file("/seed.txt", &dst, None, None).await.unwrap();
     assert_eq!(std::fs::read(&dst).unwrap(), seed, "只读下载的内容应一致");
 
     // 写路径被拒。
@@ -303,7 +303,7 @@ async fn sftp_read_only_rejects_writes() {
     let src = src_dir.join("nope.bin");
     std::fs::write(&src, payload(3, 4096)).unwrap();
     let err = client
-        .upload_file(&src, "/nope.bin", None)
+        .upload_file(&src, "/nope.bin", None, None)
         .await
         .expect_err("只读服务器必须拒绝上传");
     assert!(

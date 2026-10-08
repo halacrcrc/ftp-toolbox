@@ -64,4 +64,13 @@ impl TransferEvent {
             let _ = tx.send(ev);
         }
     }
+
+    /// The known total size, when this event carries one (`Done`/`Error`
+    /// never do).
+    pub fn total(&self) -> Option<u64> {
+        match self {
+            TransferEvent::Started { total, .. } | TransferEvent::Progress { total, .. } => *total,
+            _ => None,
+        }
+    }
 }

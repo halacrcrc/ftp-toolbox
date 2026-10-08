@@ -1,7 +1,14 @@
 import { fmtBytes } from "../lib/format";
 import { Progress, transferLabel } from "../lib/transfer";
 
-export default function ProgressBar({ progress }: { progress: Progress | null }) {
+interface Props {
+  progress: Progress | null;
+  /** Whether a cancellable transfer is in flight (footer shows the button). */
+  cancellable?: boolean;
+  onCancel?: () => void;
+}
+
+export default function ProgressBar({ progress, cancellable, onCancel }: Props) {
   if (!progress) return <footer className="progress-footer empty" />;
   const pct =
     progress.total && progress.total > 0
@@ -27,6 +34,11 @@ export default function ProgressBar({ progress }: { progress: Progress | null })
             real sample exists — a leading "0 B/s" is just noise. */}
         {progress.speed > 0 ? ` · ${fmtBytes(progress.speed)}/s` : ""}
       </span>
+      {cancellable && onCancel && (
+        <button className="btn small" onClick={onCancel} title="在下一个分块边界中止本次传输">
+          取消
+        </button>
+      )}
     </footer>
   );
 }

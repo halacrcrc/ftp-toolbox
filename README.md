@@ -14,8 +14,8 @@
 
 Windows 安装包见 [Releases](https://github.com/halacrcrc/ftp-toolbox/releases/latest)：
 
-- `ftp-toolbox_0.3.2_x64-setup.exe` — NSIS 安装程序，向导式安装（推荐）
-- `ftp-toolbox_0.3.2_x64_en-US.msi` — MSI 安装包，适合批量部署
+- `ftp-toolbox_0.3.3_x64-setup.exe` — NSIS 安装程序，向导式安装（推荐）
+- `ftp-toolbox_0.3.3_x64_en-US.msi` — MSI 安装包，适合批量部署
 
 依赖系统自带 WebView2（Win10/11 通常已预装）。安装包未做代码签名，首次运行 SmartScreen 会提示「未知发布者」，点「仍要运行」即可。
 
@@ -36,11 +36,13 @@ Windows 安装包见 [Releases](https://github.com/halacrcrc/ftp-toolbox/release
   - **TOFU 主机密钥校验**：首连需确认指纹并记入 known_hosts；指纹变更一律硬拒绝，只能显式更新
 - **TFTP 服务器 / 客户端**（自实现 RFC 1350）：
   - RFC 2348 `blksize` 协商（请求 8192，单文件上限 ~536 MB，兼容端自动回退 512 字节经典模式）
+  - RFC 2349 `tsize` 协商（下载前获知文件大小，进度条显示真实百分比；上传时声明大小，超限服务端直接拒绝）
   - 超时重传、防目录穿越、每连接独立线程（新 TID）
 - **服务器配置体验**：
   - 共享目录走系统原生文件夹选择框，配置自动记忆（密码不保存）
   - 监听地址自动枚举本机网卡，FTP 默认 21 / TFTP 默认 69 / SFTP 默认 2222（客户端连远端默认 22）
 - **详细运行日志**：后端引擎 + libunftp 会话日志实时推送到前端，TFTP 每次传输记录对端、文件名、字节数、块数、耗时——排错直接看日志面板
+- **传输可取消**：底部进度条一键中止当前传输（FTP / FTPS / SFTP / TFTP 客户端均支持，引擎在分块边界落地）；分块读写带空闲超时，对端静默失联不会再卡死客户端
 - **现代 UI**：侧边栏导航、卡片式布局（React + TypeScript + Vite）
   - 全局传输进度条：百分比 + 已传 / 总量 + **实时速度**（大小未知时只报已传字节与速度）
   - 传输日志带**大小 · 耗时 · 平均速度**；日志面板逐条显示后端结构化字段（`bytes=` `blocks=` `elapsed_ms=`）
@@ -125,7 +127,7 @@ npm run typecheck        # tsc --noEmit
 
 ## 已知限制
 
-- TFTP 未实现 `tsize` / `timeout` 选项协商；对端不支持 `blksize` 时回退经典模式
+- TFTP 未实现 `timeout` 选项协商；对端不支持 `blksize` / `tsize` 时回退经典模式
 - TFTP 69 端口在 Linux/macOS 需要特权；Windows 上若与其他 TFTP 服务冲突会提示 bind 失败
 - FTP 服务器为单用户静态账号；多用户 / 细粒度权限未接入（libunftp 的现成能力）
 - **SFTP 客户端只支持密码认证**（设计如此，见 `docs/sftp-design.md` Q5）；公钥认证是服务端能力
@@ -136,7 +138,7 @@ npm run typecheck        # tsc --noEmit
 ## Roadmap
 
 - [x] FTP over TLS（FTPS）— v0.2.5 落地
-- [ ] TFTP `tsize` 协商（下载前获知文件大小，进度条可显示百分比）
+- [x] TFTP `tsize` 协商（下载前获知文件大小，进度条可显示百分比）— v0.3.3 落地
 - [ ] FTP 远端文件树浏览（拖拽上传/下载）
 - [ ] SFTP 客户端公钥认证（属规格变更，需先定私钥来源）
 

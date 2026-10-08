@@ -57,10 +57,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
     });
 
-    client.upload_file(&local_upload, "/upload.txt", Some(tx.clone())).await?;
+    client.upload_file(&local_upload, "/upload.txt", Some(tx.clone()), None).await?;
     println!("uploaded {} -> /upload.txt", local_upload.display());
 
-    client.download_file("/seed.txt", &local_download, Some(tx.clone())).await?;
+    client.download_file("/seed.txt", &local_download, Some(tx.clone()), None).await?;
     println!("downloaded /seed.txt -> {}", local_download.display());
 
     let entries = client.list("/").await?;

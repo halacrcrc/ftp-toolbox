@@ -63,6 +63,12 @@ pub enum Error {
     /// (`MAX_RETRIES` attempts at `TIMEOUT` each).
     #[error("timeout waiting for peer")]
     Timeout,
+
+    /// The transfer was aborted by its cancellation token (user action from
+    /// the shell). Distinct from [`Error::Timeout`] so the UI can word it as
+    /// "取消" rather than a failure of the peer.
+    #[error("传输已取消")]
+    Cancelled,
 }
 
 /// Why a `bind()` failed, after looking past `io::ErrorKind`.

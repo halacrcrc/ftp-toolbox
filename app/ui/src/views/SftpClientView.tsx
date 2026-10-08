@@ -1,10 +1,13 @@
 import { useState } from "react";
-import { api, pathBase, HostKeyStatus, SftpEntry } from "../api";
+import { api, newTransferId, pathBase, HostKeyStatus, SftpEntry } from "../api";
 import { fmtBytes } from "../lib/format";
 import LocalFileField from "../components/LocalFileField";
 import { LogEntry } from "../App";
 
 type Log = (text: string, level?: LogEntry["level"]) => void;
+
+/** 传输开始/结束时上报取消令牌 id（App 据此启用进度条上的「取消」按钮）。 */
+type TransferChange = (id: string | null) => void;
 
 /** 等待用户确认的主机密钥（TOFU 首连 / 密钥变化，设计文档 §2.4）。 */
 interface HostKeyPrompt {
@@ -28,7 +31,13 @@ function formatEntry(e: SftpEntry): string {
   return `${mark} ${e.name}（${fmtBytes(e.size)}）${time}`;
 }
 
-export default function SftpClientView({ log }: { log: Log }) {
+export default function SftpClientView({
+  log,
+  onTransferChange,
+}: {
+  log: Log;
+  onTransferChange?: TransferChange;
+}) {
   // 连接远端用标准 SSH 端口 22（本应用自己的服务器默认 2222，输入框可改）
   const [host, setHost] = useState("127.0.0.1");
   const [port, setPort] = useState("22");
@@ -126,14 +135,18 @@ export default function SftpClientView({ log }: { log: Log }) {
   };
 
   const transfer = async (kind: "upload" | "download") => {
+    const transferId = newTransferId();
+    onTransferChange?.(transferId);
     try {
       const msg =
         kind === "upload"
-          ? await api.sftpClientUpload(local, remote)
-          : await api.sftpClientDownload(remote, local);
+          ? await api.sftpClientUpload(local, remote, transferId)
+          : await api.sftpClientDownload(remote, local, transferId);
       log(msg, "ok");
     } catch (e) {
       log(`${kind === "upload" ? "上传" : "下载"}失败: ${e}`, "error");
+    } finally {
+      onTransferChange?.(null);
     }
   };
 

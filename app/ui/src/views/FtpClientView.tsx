@@ -1,11 +1,20 @@
 import { useState } from "react";
-import { api, pathBase } from "../api";
+import { api, newTransferId, pathBase } from "../api";
 import LocalFileField from "../components/LocalFileField";
 import { LogEntry } from "../App";
 
 type Log = (text: string, level?: LogEntry["level"]) => void;
 
-export default function FtpClientView({ log }: { log: Log }) {
+/** 传输开始/结束时上报取消令牌 id（App 据此启用进度条上的「取消」按钮）。 */
+type TransferChange = (id: string | null) => void;
+
+export default function FtpClientView({
+  log,
+  onTransferChange,
+}: {
+  log: Log;
+  onTransferChange?: TransferChange;
+}) {
   const [addr, setAddr] = useState("127.0.0.1:2121");
   const [user, setUser] = useState("anonymous");
   const [pass, setPass] = useState("");
@@ -57,12 +66,19 @@ export default function FtpClientView({ log }: { log: Log }) {
   };
 
   const transfer = async (kind: "upload" | "download") => {
+    // 前端生成取消令牌 id：后端引擎在分块边界检查，落地即中止。
+    const transferId = newTransferId();
+    onTransferChange?.(transferId);
     try {
       const msg =
-        kind === "upload" ? await api.ftpUpload(local, remote) : await api.ftpDownload(remote, local);
+        kind === "upload"
+          ? await api.ftpUpload(local, remote, transferId)
+          : await api.ftpDownload(remote, local, transferId);
       log(msg, "ok");
     } catch (e) {
       log(`${kind === "upload" ? "上传" : "下载"}失败: ${e}`, "error");
+    } finally {
+      onTransferChange?.(null);
     }
   };
 

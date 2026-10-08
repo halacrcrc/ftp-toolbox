@@ -188,15 +188,15 @@ export const api = {
     }),
   ftpDisconnect: () => invoke<string>("ftp_disconnect"),
   ftpList: (path?: string) => invoke<string[]>("ftp_list", { path: path ?? null }),
-  ftpUpload: (local: string, remote: string) =>
-    invoke<string>("ftp_upload", { local, remote }),
-  ftpDownload: (remote: string, local: string) =>
-    invoke<string>("ftp_download", { remote, local }),
+  ftpUpload: (local: string, remote: string, transferId?: string) =>
+    invoke<string>("ftp_upload", { local, remote, transferId: transferId ?? null }),
+  ftpDownload: (remote: string, local: string, transferId?: string) =>
+    invoke<string>("ftp_download", { remote, local, transferId: transferId ?? null }),
 
-  tftpUpload: (server: string, local: string, remote: string) =>
-    invoke<string>("tftp_upload", { server, local, remote }),
-  tftpDownload: (server: string, remote: string, local: string) =>
-    invoke<string>("tftp_download", { server, remote, local }),
+  tftpUpload: (server: string, local: string, remote: string, transferId?: string) =>
+    invoke<string>("tftp_upload", { server, local, remote, transferId: transferId ?? null }),
+  tftpDownload: (server: string, remote: string, local: string, transferId?: string) =>
+    invoke<string>("tftp_download", { server, remote, local, transferId: transferId ?? null }),
 
   // ---------- SFTP server ----------
   // 命令契约见 docs/sftp-design.md §3；opts 对象字段按后端 DTO 的 camelCase
@@ -230,15 +230,19 @@ export const api = {
   sftpClientDisconnect: () => invoke<string>("sftp_client_disconnect"),
   sftpClientList: (path?: string) =>
     invoke<SftpEntry[]>("sftp_client_list", { path: path ?? null }),
-  sftpClientUpload: (localPath: string, remotePath: string) =>
-    invoke<string>("sftp_client_upload", { localPath, remotePath }),
-  sftpClientDownload: (remotePath: string, localPath: string) =>
-    invoke<string>("sftp_client_download", { remotePath, localPath }),
+  sftpClientUpload: (localPath: string, remotePath: string, transferId?: string) =>
+    invoke<string>("sftp_client_upload", { localPath, remotePath, transferId: transferId ?? null }),
+  sftpClientDownload: (remotePath: string, localPath: string, transferId?: string) =>
+    invoke<string>("sftp_client_download", { remotePath, localPath, transferId: transferId ?? null }),
   /** 主机密钥变化后，用户显式确认才允许覆盖 known_hosts 记录。 */
   sftpClientUpdateKnownHost: (host: string, port: number) =>
     invoke<string>("sftp_client_update_known_host", { host, port }),
   sftpClientClearKnownHosts: () =>
     invoke<string>("sftp_client_clear_known_hosts"),
+
+  /** 请求取消一个进行中的传输（引擎在下一个分块边界落地）。 */
+  cancelTransfer: (transferId: string) =>
+    invoke<string>("cancel_transfer", { transferId }),
 
   listInterfaces: () => invoke<NetInterface[]>("list_interfaces"),
 };
@@ -275,6 +279,11 @@ export function pathBase(p: string): string {
 
 export function onTransferProgress(cb: (ev: TransferEvent) => void) {
   return listen<TransferEvent>("transfer-progress", (e) => cb(e.payload));
+}
+
+/** Frontend-generated id for one transfer invocation (cancellation key). */
+export function newTransferId(): string {
+  return crypto.randomUUID();
 }
 
 export function onBackendLog(cb: (ev: BackendLog) => void) {

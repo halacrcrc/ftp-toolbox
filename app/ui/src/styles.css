@@ -208,6 +208,12 @@ button {
   margin: -6px 0 12px;
 }
 
+/* 例外：紧跟卡片标题的说明行。负上边距是给「字段下方」设计的，直接跟在
+   标题后会被吸到标题上（SFTP 客户端设置卡），这里恢复正常间距。 */
+.card-title + .hint-line {
+  margin-top: 8px;
+}
+
 .hint-line.warn {
   color: #b45309;
 }

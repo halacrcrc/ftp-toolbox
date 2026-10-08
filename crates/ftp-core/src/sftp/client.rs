@@ -13,6 +13,7 @@ use serde::Serialize;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tracing::{debug, info, warn};
 
+use crate::cancel::{self, CancellationToken};
 use crate::error::{error_chain, Error, Result};
 use crate::progress::{ProgressTx, TransferEvent, TransferKind};
 use crate::sftp::keys;
@@ -349,11 +350,14 @@ impl SftpClient {
 
     /// Upload a local file to a remote path, chunked, with progress events
     /// (file id = remote path; mirrors [`crate::ftp::client::FtpClient`]).
+    /// `cancel` aborts between chunks; each chunk operation is bounded by the
+    /// engine's idle timeout.
     pub async fn upload_file(
         &self,
         local: &Path,
         remote: &str,
         progress: Option<ProgressTx>,
+        cancel: Option<CancellationToken>,
     ) -> Result<()> {
         let mut local_file = tokio::fs::File::open(local).await?;
         let total = local_file.metadata().await.map(|m| m.len()).ok();
@@ -365,13 +369,18 @@ impl SftpClient {
         let mut buf = vec![0u8; 64 * 1024];
         let mut sent: u64 = 0;
         let result = loop {
-            match local_file.read(&mut buf).await {
-                Ok(0) => break Ok(sent),
-                Ok(n) => {
-                    if let Err(e) = remote_file.write_all(&buf[..n]).await {
-                        // russh-sftp 的 File 走 tokio AsyncWrite，错误已映射为 io::Error；
-                        // 用 sftp_io_err 取回原始协议错误，避免状态码被重复渲染。
-                        break Err(sftp_io_err(e));
+            if let Err(e) = cancel::check(cancel.as_ref()) {
+                break Err(e);
+            }
+            match cancel::chunk(cancel.as_ref(), local_file.read(&mut buf)).await {
+                Ok(Ok(0)) => break Ok(sent),
+                Ok(Ok(n)) => {
+                    // russh-sftp 的 File 走 tokio AsyncWrite，错误已映射为 io::Error；
+                    // 用 sftp_io_err 取回原始协议错误，避免状态码被重复渲染。
+                    match cancel::chunk(cancel.as_ref(), remote_file.write_all(&buf[..n])).await {
+                        Ok(Ok(())) => {}
+                        Ok(Err(e)) => break Err(sftp_io_err(e)),
+                        Err(e) => break Err(e),
                     }
                     sent += n as u64;
                     TransferEvent::emit(
@@ -384,7 +393,8 @@ impl SftpClient {
                         },
                     );
                 }
-                Err(e) => break Err(Error::Io(e)),
+                Ok(Err(e)) => break Err(Error::Io(e)),
+                Err(e) => break Err(e),
             }
         };
         let _ = remote_file.close().await;
@@ -416,11 +426,14 @@ impl SftpClient {
 
     /// Download a remote file to a local path via a `.part` temp file,
     /// chunked, with progress events (mirrors the FTP client's download).
+    /// `cancel` aborts between chunks; each chunk operation is bounded by the
+    /// engine's idle timeout.
     pub async fn download_file(
         &self,
         remote: &str,
         local: &Path,
         progress: Option<ProgressTx>,
+        cancel: Option<CancellationToken>,
     ) -> Result<()> {
         let mut remote_file = self.sftp.open(remote).await.map_err(sftp_core_err)?;
         let total = remote_file.metadata().await.ok().map(|m| m.len());
@@ -437,23 +450,26 @@ impl SftpClient {
             let mut buf = vec![0u8; 64 * 1024];
             let mut received: u64 = 0;
             loop {
-                match remote_file.read(&mut buf).await {
-                    Ok(0) => break,
-                    Ok(n) => {
-                        out.write_all(&buf[..n]).await?;
-                        received += n as u64;
-                        TransferEvent::emit(
-                            &progress,
-                            TransferEvent::Progress {
-                                kind: TransferKind::SftpDownload,
-                                file: remote.to_string(),
-                                bytes: received,
-                                total,
-                            },
-                        );
-                    }
-                    Err(e) => return Err(sftp_io_err(e)),
+                if let Err(e) = cancel::check(cancel.as_ref()) {
+                    return Err(e);
                 }
+                let n = match cancel::chunk(cancel.as_ref(), remote_file.read(&mut buf)).await {
+                    Ok(Ok(0)) => break,
+                    Ok(Ok(n)) => n,
+                    Ok(Err(e)) => return Err(sftp_io_err(e)),
+                    Err(e) => return Err(e),
+                };
+                out.write_all(&buf[..n]).await?;
+                received += n as u64;
+                TransferEvent::emit(
+                    &progress,
+                    TransferEvent::Progress {
+                        kind: TransferKind::SftpDownload,
+                        file: remote.to_string(),
+                        bytes: received,
+                        total,
+                    },
+                );
             }
             out.flush().await?;
             Ok(received)

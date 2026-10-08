@@ -51,6 +51,10 @@ export default function App() {
   const [progress, setProgress] = useState<Progress | null>(null);
   // Read synchronously by the progress handler (see the effect below).
   const progressRef = useRef<Progress | null>(null);
+  // Cancellation key of the transfer currently in flight (set by the client
+  // views around their invoke; cleared when it settles). Non-null enables
+  // the footer cancel button.
+  const [activeTransferId, setActiveTransferId] = useState<string | null>(null);
   // Server run state lives here (App never unmounts) and is always re-read from
   // the backend when the servers page is opened — the pages themselves are
   // mounted/unmounted on navigation, so component-local state would be lost.
@@ -146,6 +150,15 @@ export default function App() {
     };
   }, [log]);
 
+  /** Ask the backend to abort the current transfer; engine lands the abort
+   *  at the next chunk boundary. Errors (e.g. already finished) just log. */
+  const cancelActiveTransfer = useCallback(() => {
+    const id = activeTransferId;
+    if (!id) return;
+    log("已请求取消当前传输…");
+    api.cancelTransfer(id).catch((e) => log(`取消传输失败: ${e}`, "error"));
+  }, [activeTransferId, log]);
+
   // Backend tracing events (engine + libunftp): the detailed half of the
   // log view — server sessions, per-transfer byte/block/elapsed stats, etc.
   useEffect(() => {
@@ -183,12 +196,18 @@ export default function App() {
               refresh={refreshServers}
             />
           )}
-          {view === "ftp" && <FtpClientView log={log} />}
-          {view === "tftp" && <TftpClientView log={log} />}
-          {view === "sftp-client" && <SftpClientView log={log} />}
+          {view === "ftp" && <FtpClientView log={log} onTransferChange={setActiveTransferId} />}
+          {view === "tftp" && <TftpClientView log={log} onTransferChange={setActiveTransferId} />}
+          {view === "sftp-client" && (
+            <SftpClientView log={log} onTransferChange={setActiveTransferId} />
+          )}
           {view === "logs" && <LogView logs={logs} onClear={() => setLogs([])} />}
         </main>
-        <ProgressBar progress={progress} />
+        <ProgressBar
+          progress={progress}
+          cancellable={activeTransferId !== null}
+          onCancel={cancelActiveTransfer}
+        />
       </div>
     </div>
   );

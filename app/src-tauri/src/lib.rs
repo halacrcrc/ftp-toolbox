@@ -83,6 +83,7 @@ async fn start_ftp_server(
     pass: Option<String>,
     passive_ports: Option<String>,
     ftps_enabled: Option<bool>,
+    allow_active_mode: Option<bool>,
 ) -> CmdResult<String> {
     // Guard first: starting a second instance on the same port only produces an
     // "address already in use" bind failure — and the old handle is dropped
@@ -110,15 +111,22 @@ async fn start_ftp_server(
     // validates the files again pre-bind, but generating here keeps the
     // fingerprint visible in the returned message.
     let ftps_on = ftps_enabled.unwrap_or(false);
-    let mut ftps_note = String::new();
+    // 安全权衡见引擎注释：libunftp 的 PORT 无 bounce 防护，默认关，
+    // 只有交换机/老式客户端场景才需要用户手动打开。
+    let active_on = allow_active_mode.unwrap_or(false);
+    let mut mode_note = String::new();
+    if active_on {
+        mode_note.push_str("，主动模式（PORT）已启用");
+    }
     let options = FtpServerOptions {
         passive_ports: passive::parse(passive_ports.as_deref().unwrap_or("")).map_err(err)?,
         ftps: None,
+        allow_active_mode: active_on,
     };
     let options = if ftps_on {
         let (cert_path, key_path) = ftps_cert_paths(&app)?;
         let info = tls::load_or_generate(&cert_path, &key_path).map_err(err)?;
-        ftps_note = format!("，FTPS 已启用（证书指纹 {}）", info.fingerprint);
+        mode_note.push_str(&format!("，FTPS 已启用（证书指纹 {}）", info.fingerprint));
         tracing::info!(fingerprint = %info.fingerprint, cert = %info.cert_path, "FTPS 证书就绪");
         FtpServerOptions { ftps: Some(ftp_core::ftp::FtpsOptions {
             certs_file: PathBuf::from(info.cert_path),
@@ -184,7 +192,7 @@ async fn start_ftp_server(
         ));
     }
     Ok(format!(
-        "FTP 服务器已启动：监听 {detail}（{mode}，被动端口 {passive}）{ftps_note}{note}"
+        "FTP 服务器已启动：监听 {detail}（{mode}，被动端口 {passive}）{mode_note}{note}"
     ))
 }
 

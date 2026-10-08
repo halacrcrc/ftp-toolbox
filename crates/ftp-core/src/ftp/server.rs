@@ -5,7 +5,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use libunftp::auth::{AuthenticationError, Authenticator, Credentials, DefaultUser};
-use libunftp::options::FtpsRequired;
+use libunftp::options::{ActivePassiveMode, FtpsRequired};
 use libunftp::Server;
 use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::{broadcast, watch};
@@ -44,11 +44,20 @@ pub struct FtpServerOptions {
     pub passive_ports: Range<u16>,
     /// `Some` enables FTPS; `None` keeps the server plain FTP.
     pub ftps: Option<FtpsOptions>,
+    /// Whether clients may request **active** mode (`PORT`).
+    ///
+    /// libunftp defaults to `PassiveOnly`, and answering `502 Active mode not
+    /// enabled` is exactly what old network-equipment FTP clients (Huawei/H3C
+    /// switches, which default to active mode) die on. Off by default because
+    /// libunftp's PORT handler connects to *any* host:port the client names —
+    /// no bounce protection — so active mode on an anonymous server is an
+    /// open invitation for LAN port-scan relaying. Enable on trusted LANs.
+    pub allow_active_mode: bool,
 }
 
 impl Default for FtpServerOptions {
     fn default() -> Self {
-        Self { passive_ports: DEFAULT_PASSIVE_PORTS, ftps: None }
+        Self { passive_ports: DEFAULT_PASSIVE_PORTS, ftps: None, allow_active_mode: false }
     }
 }
 
@@ -112,6 +121,9 @@ struct ServerConfig {
     passive_ports: Range<u16>,
     /// `Some` enables explicit FTPS (`AUTH TLS`), handled inside libunftp.
     ftps: Option<Arc<FtpsOptions>>,
+    /// Allow the client-driven data connection (`PORT`); see
+    /// [`FtpServerOptions::allow_active_mode`].
+    allow_active_mode: bool,
 }
 
 impl ServerConfig {
@@ -125,7 +137,16 @@ impl ServerConfig {
         let pasv = self.passive_ports.start..self.passive_ports.end.saturating_sub(1);
         let mut builder = Server::with_fs(self.root.clone())
             .greeting(GREETING)
-            .passive_ports(pasv);
+            .passive_ports(pasv)
+            // libunftp's default is PassiveOnly: `PORT` gets "502 Active mode
+            // not enabled", which is where legacy network-device clients
+            // (Huawei/H3C) give up. Opting in is a deliberate security tradeoff
+            // (see FtpServerOptions::allow_active_mode), not a bug workaround.
+            .active_passive_mode(if self.allow_active_mode {
+                ActivePassiveMode::ActiveAndPassive
+            } else {
+                ActivePassiveMode::PassiveOnly
+            });
         if let Some(auth) = &self.auth {
             builder = builder
                 .authenticator(Arc::clone(auth) as Arc<dyn Authenticator<DefaultUser> + Send + Sync>);
@@ -266,6 +287,11 @@ pub async fn start_server_with(
         .map(|a| a.to_string())
         .unwrap_or_else(|_| bind.clone());
     let passive_label = options.passive_ports_label();
+    if options.allow_active_mode {
+        // Loud on purpose: active mode lets the server dial whatever
+        // host:port the client names (no bounce protection in libunftp).
+        info!("active mode (PORT) enabled — 数据连接将由服务器主动连向客户端指定的地址，仅建议在可信内网使用");
+    }
 
     let cfg = Arc::new(ServerConfig {
         root: root.clone(),
@@ -275,6 +301,7 @@ pub async fn start_server_with(
         },
         passive_ports: options.passive_ports.clone(),
         ftps: options.ftps.map(Arc::new),
+        allow_active_mode: options.allow_active_mode,
     });
 
     let shared = ServerShared::new("ftp");

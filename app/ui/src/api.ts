@@ -145,7 +145,8 @@ export const api = {
     user?: string,
     pass?: string,
     passivePorts?: string,
-    ftps?: boolean
+    ftps?: boolean,
+    allowActiveMode?: boolean
   ) =>
     invoke<string>("start_ftp_server", {
       root,
@@ -154,6 +155,7 @@ export const api = {
       pass: pass ?? null,
       passivePorts: passivePorts && passivePorts.length > 0 ? passivePorts : null,
       ftpsEnabled: ftps ?? false,
+      allowActiveMode: allowActiveMode ?? false,
     }),
   stopFtpServer: () => invoke<string>("stop_ftp_server"),
   ftpServerStatus: () => invoke<ServerStatus>("ftp_server_status"),

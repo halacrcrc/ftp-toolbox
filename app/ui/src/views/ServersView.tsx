@@ -33,6 +33,8 @@ interface ServerPrefs {
   passive: string;
   /** 启用 FTPS（显式 TLS；明文客户端仍可连 —— 服务端是可选 TLS）。 */
   ftps: boolean;
+  /** 允许主动模式（PORT）。交换机/老式客户端需要；仅建议可信内网开启。 */
+  allowActive: boolean;
   /** SFTP：授权公钥行（OpenSSH 格式）。公钥不是机密，随其它配置一起持久化。 */
   authorizedKeys: string[];
   /** SFTP：只读模式（拒绝写入/删除/重命名等修改操作）。 */
@@ -110,6 +112,8 @@ interface ServerCardProps {
   defaultPassive?: string;
   /** 是否暴露 FTPS（显式 TLS）开关与证书折叠区（只有 FTP 需要）。 */
   withFtps?: boolean;
+  /** 是否暴露「允许主动模式（PORT）」开关（只有 FTP 需要）。 */
+  withActiveMode?: boolean;
   /**
    * 是否为 SFTP 卡片：单用户名+密码、授权公钥、只读开关、主机密钥折叠区。
    * 与 FTP 的「可选匿名」不同，用户名密码始终显示（密码可留空走纯公钥认证）。
@@ -130,7 +134,9 @@ interface ServerCardProps {
     passivePorts?: string,
     ftps?: boolean,
     /** withSftp 时的附加启动选项。 */
-    sftp?: { authorizedKeys: string[]; readOnly: boolean }
+    sftp?: { authorizedKeys: string[]; readOnly: boolean },
+    /** withActiveMode 时的附加启动选项：允许主动模式（PORT）。 */
+    allowActiveMode?: boolean
   ) => Promise<string>;
   onStop: () => Promise<string>;
   /** Re-read server state (and interfaces) from the backend. */
@@ -140,7 +146,7 @@ interface ServerCardProps {
 
 function ServerCard({
   serverKey, title, desc, defaultRoot, defaultPort, portHint,
-  withAuth, withPassive, defaultPassive = "", withFtps, withSftp, hostKey: hostKeyProp,
+  withAuth, withPassive, defaultPassive = "", withFtps, withActiveMode, withSftp, hostKey: hostKeyProp,
   interfaces, interfacesLoaded, status, onStart, onStop, onRefresh, log,
 }: ServerCardProps) {
   const storageKey = `ftp-toolbox:server:${serverKey}`;
@@ -153,6 +159,7 @@ function ServerCard({
       user: "admin",
       passive: defaultPassive,
       ftps: false,
+      allowActive: false,
       authorizedKeys: [],
       readOnly: false,
     })
@@ -371,7 +378,8 @@ function ServerCard({
         withSftp ? pass : useAccount ? pass : undefined,
         withPassive ? prefs.passive : undefined,
         withFtps ? prefs.ftps : undefined,
-        withSftp ? { authorizedKeys: prefs.authorizedKeys, readOnly: prefs.readOnly } : undefined
+        withSftp ? { authorizedKeys: prefs.authorizedKeys, readOnly: prefs.readOnly } : undefined,
+        withActiveMode ? prefs.allowActive : undefined
       );
       log(msg, "ok");
     } catch (e) {
@@ -585,6 +593,31 @@ function ServerCard({
             busy={busy}
             emptyHint="证书尚未生成，首次启用 FTPS 时自动创建"
           />
+        </>
+      )}
+
+      {withActiveMode && (
+        <>
+          <label className="field">
+            <span>主动模式（PORT）</span>
+            <div className="radio-row">
+              <label className="radio">
+                <input
+                  type="checkbox"
+                  checked={prefs.allowActive}
+                  onChange={(e) => set("allowActive", e.target.checked)}
+                  disabled={running}
+                />
+                允许主动模式（交换机、老式网络设备的 FTP 客户端需要）
+              </label>
+            </div>
+          </label>
+          {prefs.allowActive && (
+            <div className="hint-line warn">
+              ⚠ 主动模式下数据连接由服务器主动连向客户端指定的地址（不校验目标）；
+              仅建议在可信内网开启。日常用 Windows / FileZilla 等图形客户端不需要它（默认被动模式）。
+            </div>
+          )}
         </>
       )}
 
@@ -829,12 +862,15 @@ export default function ServersView({ log, ftpStatus, tftpStatus, sftpStatus, re
         withAuth
         withPassive
         withFtps
+        withActiveMode
         // 与 ftp-core 的 DEFAULT_PASSIVE_PORTS (50000..50100) 保持一致
         defaultPassive="50000-50099"
         interfaces={interfaces}
         interfacesLoaded={interfacesLoaded}
         status={ftpStatus}
-        onStart={api.startFtpServer}
+        onStart={(root, addr, user, pass, passive, ftps, _sftp, allowActive) =>
+          api.startFtpServer(root, addr, user, pass, passive, ftps, allowActive)
+        }
         onStop={api.stopFtpServer}
         onRefresh={refreshAll}
         log={log}

@@ -3,7 +3,7 @@ This file provides guidance to CodeBuddy when working with code in this reposito
 
 ## 项目概览
 
-**ftp-toolbox**：基于 Tauri v2 + React + Rust 的 FTP / FTPS / SFTP / TFTP 服务器与客户端一体 Windows 桌面工具。当前版本 0.3.2，MIT OR Apache-2.0 双许可。设计规格与决策记录在 `docs/`（如 `docs/sftp-design.md` 的 SFTP Q1–Q12 取舍）；评审/交接/验证报告在 `deliverables/software-company/`；代码审查的分级标准、审查节点与红线清单在 `docs/code-review.md`（改代码前先过一遍）。
+**ftp-toolbox**：基于 Tauri v2 + React + Rust 的 FTP / FTPS / SFTP / TFTP 服务器与客户端一体 Windows 桌面工具。当前版本 0.3.3，MIT OR Apache-2.0 双许可。设计规格与决策记录在 `docs/`（如 `docs/sftp-design.md` 的 SFTP Q1–Q12 取舍）；评审/交接/验证报告在 `deliverables/software-company/`；代码审查的分级标准、审查节点与红线清单在 `docs/code-review.md`（改代码前先过一遍）。
 
 ## 常用命令
 
@@ -55,9 +55,10 @@ node "C:/WorkBuddy/FTP/app/ui/node_modules/@tauri-apps/cli/tauri.js" build
 crates/ftp-core        纯 tokio 引擎，无 GUI 依赖
   src/ftp/             FTP server（libunftp 0.20 + unftp-sbe-fs）+ client（suppaftp 6），FTPS 自签证书
   src/sftp/            SFTP server + client（russh + russh-sftp），主机密钥 TOFU
-  src/tftp/            TFTP 自实现（RFC 1350 + 2348 blksize OACK），不走 libunftp
+  src/tftp/            TFTP 自实现（RFC 1350 + 2347/2348/2349 blksize+tsize），不走 libunftp
   src/tls.rs           FTPS 自签证书（rcgen），load_or_generate 自愈
   src/lifecycle.rs     运行态真相源：ServerShared + watch
+  src/cancel.rs        客户端传输取消（CancellationToken）+ 30s 空闲超时
   src/net.rs           网卡枚举与链路判定纯函数
   src/progress.rs / log_fields.rs / error.rs
   tests/               回环集成测试（ftps_loopback、sftp、tftp、ftp_active_mode 等）
@@ -77,6 +78,12 @@ app/ui                 React 18 + Vite + TS：api.ts 封装 invoke，views/ + co
 - 被动端口解析/校验/建议：`crates/ftp-core/src/ftp/passive.rs`；壳层只留 netsh 读取与提示。
 - 网卡链路判定：`net.rs` 纯函数（双信号都读不到 → 宁显示不隐藏）。
 - 前端要用的日志/进度纯逻辑放 `crates/ftp-core`（如 `progress.rs`、`log_fields.rs`），保证可被单测覆盖。
+
+### 传输取消（改传输相关代码前必读）
+
+- 六个客户端传输函数（`FtpClient::upload/download`、`SftpClient::upload_file/download_file`、`tftp::put/get`）末参都是 `cancel: Option<CancellationToken>`；取消在分块边界落地，分块读写统一走 `cancel::chunk`（带 30s 空闲超时）。
+- 壳层传输命令带 `transfer_id: Option<String>` 尾参 + `cancel_transfer` 命令；前端 `newTransferId()` 生成、`finally` 里清理，App.tsx 据此显示进度条取消按钮。
+- 出包核对发布者认准主程序 `ftp-toolbox-app.exe` 的 CompanyName 与 MSI Manufacturer；NSIS setup.exe 包装器的 CompanyName 本来就是空，不是回归。
 
 ### 前端约定（app/ui）
 

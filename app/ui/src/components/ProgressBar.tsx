@@ -26,6 +26,9 @@ export default function ProgressBar({ progress, cancellable, onCancel }: Props) 
         />
       </div>
       <span className="progress-value">
+        {/* JSX 吞掉表达式之间的换行与缩进空白，所以下面三段之间的分隔完全靠
+            模板串自身的空格：`% · ` 的尾随空格、` / ` 与 ` · ` 的前导空格。
+            这三个空格是刻意的，删掉会让数字与单位粘连成一片（评审 #8）。 */}
         {pct !== null ? `${pct}% · ` : ""}
         {fmtBytes(progress.bytes)}
         {progress.total ? ` / ${fmtBytes(progress.total)}` : ""}

@@ -3,6 +3,7 @@ use std::path::{Path, PathBuf};
 use tokio::fs::File;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::UdpSocket;
+use tracing::debug;
 
 use super::packet::{negotiated_blksize, negotiated_tsize, Packet, MAX_BLKSIZE};
 use super::{BLOCK_SIZE, MAX_RETRIES, TIMEOUT};
@@ -49,17 +50,36 @@ pub async fn download(
     let mut buf = vec![0u8; MAX_BLKSIZE + 68];
     let mut first_data: Option<Vec<u8>> = None;
     let mut handshook = false;
-    for _ in 0..MAX_RETRIES {
-        let received = tokio::select! {
-            _ = cancel::cancelled(cancel.as_ref()) => {
-                emit_err(&progress, TransferKind::Download, &name, &Error::Cancelled);
-                return Err(Error::Cancelled);
+    'attempts: for _ in 0..MAX_RETRIES {
+        // 握手期逐包校验来源：同网段第三方可以抢在真服务器之前发伪造应答，
+        // 下面的 connect() 会把 socket 导向它 —— RRQ 内容注入 / WRQ 数据外泄
+        // （review 2026-10-08 #2）。RFC 1350 应答来自新 TID，端口必不同，
+        // 只能比对来源 IP。
+        let (n, peer) = loop {
+            let received = tokio::select! {
+                _ = cancel::cancelled(cancel.as_ref()) => {
+                    emit_err(&progress, TransferKind::Download, &name, &Error::Cancelled);
+                    return Err(Error::Cancelled);
+                }
+                r = tokio::time::timeout(TIMEOUT, sock.recv_from(&mut buf)) => r,
+            };
+            match received {
+                Ok(Ok((n, peer))) if super::first_reply_is_from_request_host(server, peer) => {
+                    break (n, peer);
+                }
+                Ok(Ok((_, bogus))) => {
+                    debug!(%bogus, "tftp: 忽略来自非请求主机的首包（不重传请求，真应答可能已在路上）");
+                    continue;
+                }
+                Ok(Err(e)) => return Err(e.into()),
+                Err(_) => {
+                    sock.send_to(&rrq, server).await?; // server may have missed our request
+                    continue 'attempts;
+                }
             }
-            r = tokio::time::timeout(TIMEOUT, sock.recv_from(&mut buf)) => r,
         };
-        match received {
-            Ok(Ok((n, peer))) => {
-                sock.connect(peer).await?;
+        {
+            sock.connect(peer).await?;
                 match Packet::decode(&buf[..n])? {
                 Packet::Oack { options } => {
                     if let Some(b) = negotiated_blksize(&options) {
@@ -87,11 +107,6 @@ pub async fn download(
                     return Err(err);
                 }
                 }
-            }
-            Ok(Err(e)) => return Err(e.into()),
-            Err(_) => {
-                sock.send_to(&rrq, server).await?; // server may have missed our request
-            }
         }
     }
     if !handshook {
@@ -126,6 +141,17 @@ pub async fn download(
             out.write_all(&data).await?;
             received += data.len() as u64;
             sock.send(&Packet::Ack { block: 1 }.encode()).await?;
+            // 经典路径也要发 Progress：单块小文件不能只有 Started/Done
+            // （review 2026-10-08 #6）。
+            TransferEvent::emit(
+                &progress,
+                TransferEvent::Progress {
+                    kind: TransferKind::Download,
+                    file: name.clone(),
+                    bytes: received,
+                    total: tsize,
+                },
+            );
             if done {
                 out.flush().await?;
                 return Ok::<u64, Error>(received);
@@ -227,17 +253,33 @@ pub async fn upload(
     let mut blksize = BLOCK_SIZE;
     let mut buf = vec![0u8; MAX_BLKSIZE + 68];
     let mut handshook = false;
-    for _ in 0..MAX_RETRIES {
-        let received = tokio::select! {
-            _ = cancel::cancelled(cancel.as_ref()) => {
-                emit_err(&progress, TransferKind::Upload, &name, &Error::Cancelled);
-                return Err(Error::Cancelled);
+    'attempts: for _ in 0..MAX_RETRIES {
+        // 与下载握手相同：逐包校验来源 IP，防伪造首包劫持 socket（#2）
+        let (n, peer) = loop {
+            let received = tokio::select! {
+                _ = cancel::cancelled(cancel.as_ref()) => {
+                    emit_err(&progress, TransferKind::Upload, &name, &Error::Cancelled);
+                    return Err(Error::Cancelled);
+                }
+                r = tokio::time::timeout(TIMEOUT, sock.recv_from(&mut buf)) => r,
+            };
+            match received {
+                Ok(Ok((n, peer))) if super::first_reply_is_from_request_host(server, peer) => {
+                    break (n, peer);
+                }
+                Ok(Ok((_, bogus))) => {
+                    debug!(%bogus, "tftp: 忽略来自非请求主机的首包（不重传请求，真应答可能已在路上）");
+                    continue;
+                }
+                Ok(Err(e)) => return Err(e.into()),
+                Err(_) => {
+                    sock.send_to(&wrq, server).await?;
+                    continue 'attempts;
+                }
             }
-            r = tokio::time::timeout(TIMEOUT, sock.recv_from(&mut buf)) => r,
         };
-        match received {
-            Ok(Ok((n, peer))) => {
-                sock.connect(peer).await?;
+        {
+            sock.connect(peer).await?;
                 match Packet::decode(&buf[..n])? {
                 Packet::Oack { options } => {
                     if let Some(b) = negotiated_blksize(&options) {
@@ -262,11 +304,6 @@ pub async fn upload(
                     return Err(err);
                 }
                 }
-            }
-            Ok(Err(e)) => return Err(e.into()),
-            Err(_) => {
-                sock.send_to(&wrq, server).await?;
-            }
         }
     }
     if !handshook {
@@ -283,7 +320,15 @@ pub async fn upload(
             emit_err(&progress, TransferKind::Upload, &name, &e);
             return Err(e);
         }
-        let n = file.read(&mut chunk).await?;
+        // 本地文件读也走 chunk（取消 + 空闲上界），与"每个分块操作都有上界"
+        // 的模块承诺一致（review 2026-10-08 #5）。
+        let n = match cancel::chunk(cancel.as_ref(), file.read(&mut chunk)).await {
+            Ok(r) => r?,
+            Err(e) => {
+                emit_err(&progress, TransferKind::Upload, &name, &e);
+                return Err(e);
+            }
+        };
         let packet = Packet::Data { block, data: chunk[..n].to_vec() }.encode();
         sock.send(&packet).await?;
 

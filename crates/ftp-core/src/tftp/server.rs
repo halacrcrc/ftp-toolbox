@@ -293,6 +293,8 @@ async fn open_rrq(
     root: &Path,
     name: &str,
 ) -> std::result::Result<(PathBuf, File, u64), (u16, String, Error)> {
+    // 穿越拒绝回 2（Access violation）而非 1（File not found）：既贴合错误码
+    // 语义，也不向对端泄露"文件是否存在"（review 2026-10-08 #9，设计取舍）。
     let path = resolve(root, name).map_err(|e| (2u16, "Access violation".to_string(), e))?;
     match File::open(&path).await {
         Ok(file) => {

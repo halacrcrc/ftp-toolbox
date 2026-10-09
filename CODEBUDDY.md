@@ -112,6 +112,13 @@ app/ui                 React 18 + Vite + TS：api.ts 封装 invoke，views/ + co
 - 安装包不进版本库（仓库根 `dist/` 被 .gitignore 忽略），只上传 GitHub Releases。
 - 提交信息用 Conventional Commits 风格（英文）：`feat(sftp): ...`、`fix(tftp): ...`。
 
+## 文档与交接约定
+
+- `deliverables/software-company/handoff-*.md` 是历史快照；撰写时**不要硬编码易变的 git 状态**
+  （`origin/main` 哈希、tag 指向、"某提交未 push"）——要么加"截至 <日期 时间>"限定，要么直接给命令
+  （`git status -sb`、`git rev-parse origin/main`）让读者自证。2026-10-09 事后审计 #24 发现
+  `handoff-2026-10-09.md` 的 `origin/main` 与发版顺序均已漂移，该文文末已附勘误表。
+
 ## 贡献许可
 
 项目以 MIT OR Apache-2.0 双许可发布；提交即视为按双许可授权，不接受者不要提 PR。

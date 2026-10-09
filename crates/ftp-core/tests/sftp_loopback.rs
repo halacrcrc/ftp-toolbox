@@ -323,3 +323,53 @@ async fn sftp_read_only_rejects_writes() {
     client.disconnect().await.unwrap();
     handle.stop().await;
 }
+
+/// 取消（评审 2026-10-09 测试缺口 #3）：预取消令牌下 SFTP 上传/下载必须以
+/// `Error::Cancelled` 失败，不产出本地文件 / `.part` 残留，且会话此后仍可用。
+/// 说明：loopback 上传输耗时毫秒级，「传输中途取消」与预取消走完全相同的
+/// 代码路径（循环顶 check + chunk select），这里取确定性的预取消形态。
+#[tokio::test]
+async fn sftp_cancelled_transfers_report_cancelled_and_keep_session_usable() {
+    use ftp_core::CancellationToken;
+
+    let (handle, app_data, root, _shutdown) = start_server("cancel", false).await;
+    let seed = b"sftp cancel seed\n".to_vec();
+    std::fs::write(root.join("seed.txt"), &seed).unwrap();
+    let cfg = client_cfg(handle.port);
+
+    let client = SftpClient::connect(cfg, &app_data, true).await.unwrap();
+
+    // 取消上传：不落远端内容、不留 .part（远端可能留下 0 字节占位，与 FTP
+    // 取消上传的服务端行为一致），会话保持可用。
+    let src_dir = temp_dir("cancel-src");
+    let src = src_dir.join("upload.bin");
+    std::fs::write(&src, payload(5, 4096)).unwrap();
+    let token = CancellationToken::new();
+    token.cancel();
+    let err = client
+        .upload_file(&src, "/upload.bin", None, Some(token))
+        .await
+        .unwrap_err();
+    assert!(matches!(err, ftp_core::Error::Cancelled), "期望 Cancelled，得到 {err:?}");
+    let dst_probe = temp_dir("cancel-probe");
+    client.list("/").await.expect("取消上传后会话必须仍可用");
+
+    // 取消下载：无本地文件、无 .part 残留。
+    let dst = dst_probe.join("seed.txt");
+    let token = CancellationToken::new();
+    token.cancel();
+    let err = client
+        .download_file("/seed.txt", &dst, None, Some(token))
+        .await
+        .unwrap_err();
+    assert!(matches!(err, ftp_core::Error::Cancelled), "期望 Cancelled，得到 {err:?}");
+    assert!(!dst.exists(), "取消的下载不得产出目标文件");
+    // 引擎的 .part 命名是 os_str.push(".part")，不是 with_extension
+    let mut part_os = dst.as_os_str().to_os_string();
+    part_os.push(".part");
+    assert!(!std::path::PathBuf::from(part_os).exists(), "不得留下 .part");
+    client.list("/").await.expect("取消下载后会话必须仍可用");
+
+    client.disconnect().await.unwrap();
+    handle.stop().await;
+}

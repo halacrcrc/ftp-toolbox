@@ -51,7 +51,10 @@ impl FtpClient {
     /// travel in cleartext on an FTPS connection.
     pub async fn connect_ext(addr: &str, user: &str, pass: &str, tls: FtpsMode) -> Result<Self> {
         let mut stream = AsyncNativeTlsFtpStream::connect(addr).await?;
-        if let FtpsMode::Explicit { accept_invalid_certs } = tls {
+        if let FtpsMode::Explicit {
+            accept_invalid_certs,
+        } = tls
+        {
             stream = stream
                 .into_secure(tls_connector(accept_invalid_certs)?, tls_host(addr)?)
                 .await?;
@@ -101,7 +104,23 @@ impl FtpClient {
             },
         );
 
-        let mut data = self.stream.put_with_stream(remote).await?;
+        // STOR 被拒（目录不存在/权限）是常见路径：Started 已发，这里必须
+        // 补 Error 事件，否则前端进度条卡死（2026-10-09 整改轮 #12）。
+        let mut data = match self.stream.put_with_stream(remote).await {
+            Ok(d) => d,
+            Err(e) => {
+                let err = Error::from(e);
+                TransferEvent::emit(
+                    &progress,
+                    TransferEvent::Error {
+                        kind: TransferKind::Upload,
+                        file: name,
+                        message: err.to_string(),
+                    },
+                );
+                return Err(err);
+            }
+        };
         let mut buf = vec![0u8; 64 * 1024];
         let mut sent: u64 = 0;
         let result: Result<()> = loop {
@@ -134,7 +153,19 @@ impl FtpClient {
             Ok(()) => {
                 // Must run even on the n == 0 path: without the finalise the
                 // server never sees the end-of-data marker.
-                self.stream.finalize_put_stream(data).await?;
+                if let Err(e) = self.stream.finalize_put_stream(data).await {
+                    // 收尾被拒（配额/磁盘满等）同样要发 Error 事件（#12）。
+                    let err = Error::from(e);
+                    TransferEvent::emit(
+                        &progress,
+                        TransferEvent::Error {
+                            kind: TransferKind::Upload,
+                            file: name,
+                            message: err.to_string(),
+                        },
+                    );
+                    return Err(err);
+                }
                 TransferEvent::emit(
                     &progress,
                     TransferEvent::Done {
@@ -151,14 +182,11 @@ impl FtpClient {
                 // finalize_put_stream does this read on the success path; the
                 // cancel path must do it too, or the line stays in the reader
                 // buffer and EVERY following command reads it first —
-                // UnexpectedResponse forever (review 2026-10-08 #1).
+                // UnexpectedResponse forever (review 2026-10-09 #1).
                 let _ = data.close().await;
                 drop(data);
-                let _ = self.stream.read_response_in(&[
-                    suppaftp::Status::ClosingDataConnection,
-                    suppaftp::Status::RequestedFileActionOk,
-                    suppaftp::Status::TransferAborted,
-                ]).await;
+                drain_closing_response(&mut self.stream).await;
+                // 上面已发 Error 事件（含取消），这里直接传播错误。
                 TransferEvent::emit(
                     &progress,
                     TransferEvent::Error {
@@ -206,39 +234,45 @@ impl FtpClient {
         let part = PathBuf::from(part_os);
         let written = async {
             let mut data = self.stream.retr_as_stream(remote).await?;
-            let mut out = File::create(&part).await?;
-            let mut buf = vec![0u8; 64 * 1024];
-            let mut received: u64 = 0;
-            loop {
-                if let Err(e) = cancel::check(cancel.as_ref()) {
-                    abort_retr(&mut self.stream, &mut data).await;
-                    return Err(e);
-                }
-                let n = match cancel::chunk(cancel.as_ref(), data.read(&mut buf)).await {
-                    Ok(r) => r?,
-                    Err(e) => {
-                        abort_retr(&mut self.stream, &mut data).await;
-                        return Err(e);
+            // 内层只管本地落盘：任何失败（磁盘满/权限，整改轮 #11）都由外层
+            // 统一排空控制通道——数据连接已建立，服务端随后必回 426/226，
+            // 漏读与上轮 #1 是同一种错位。
+            let r: Result<u64> = async {
+                let mut out = File::create(&part).await?;
+                let mut buf = vec![0u8; 64 * 1024];
+                let mut received: u64 = 0;
+                loop {
+                    cancel::check(cancel.as_ref())?;
+                    let n = cancel::chunk(cancel.as_ref(), data.read(&mut buf)).await??;
+                    if n == 0 {
+                        break;
                     }
-                };
-                if n == 0 {
-                    break;
+                    out.write_all(&buf[..n]).await?;
+                    received += n as u64;
+                    TransferEvent::emit(
+                        &progress,
+                        TransferEvent::Progress {
+                            kind: TransferKind::Download,
+                            file: name.clone(),
+                            bytes: received,
+                            total,
+                        },
+                    );
                 }
-                out.write_all(&buf[..n]).await?;
-                received += n as u64;
-                TransferEvent::emit(
-                    &progress,
-                    TransferEvent::Progress {
-                        kind: TransferKind::Download,
-                        file: name.clone(),
-                        bytes: received,
-                        total,
-                    },
-                );
+                out.flush().await?;
+                Ok(received)
             }
-            out.flush().await?;
-            self.stream.finalize_retr_stream(data).await?;
-            Ok::<u64, Error>(received)
+            .await;
+            match r {
+                Ok(received) => {
+                    self.stream.finalize_retr_stream(data).await?;
+                    Ok::<u64, Error>(received)
+                }
+                Err(e) => {
+                    abort_retr(&mut self.stream, &mut data).await;
+                    Err(e)
+                }
+            }
         }
         .await;
 
@@ -246,7 +280,16 @@ impl FtpClient {
             Ok(received) => {
                 if let Err(e) = tokio::fs::rename(&part, local).await {
                     let _ = tokio::fs::remove_file(&part).await;
-                    return Err(e.into());
+                    let err = Error::Io(e);
+                    TransferEvent::emit(
+                        &progress,
+                        TransferEvent::Error {
+                            kind: TransferKind::Download,
+                            file: name,
+                            message: err.to_string(),
+                        },
+                    );
+                    return Err(err);
                 }
                 TransferEvent::emit(
                     &progress,
@@ -282,9 +325,7 @@ impl FtpClient {
 /// server sends on the control channel once it sees the drop (226/426/550).
 /// `finalize_retr_stream` performs this read on the success path; skipping it
 /// on the cancel path leaves the line in the response buffer and every later
-/// command reads it first — UnexpectedResponse forever (review 2026-10-08 #1).
-/// Read failures are ignored: the peer may already be gone, and the transfer
-/// error being propagated takes precedence regardless.
+/// command reads it first — UnexpectedResponse forever (review 2026-10-09 #1).
 async fn abort_retr<D>(stream: &mut AsyncNativeTlsFtpStream, data: &mut D)
 where
     // suppaftp 未公开 `AsyncTlsStream`/`DataStream` 的可命名路径，这里按能力
@@ -292,13 +333,23 @@ where
     D: futures::io::AsyncWrite + Unpin,
 {
     let _ = data.close().await;
-    let _ = stream
-        .read_response_in(&[
+    drain_closing_response(stream).await;
+}
+
+/// Drain the control-channel closing response after an aborted data channel.
+/// suppaftp 的 `read_response_in` 没有内置超时（已核实上游），这里必须自己设
+/// 界：对端静默时取消路径若无限等待，会话互斥锁会被永久持有（2026-10-09
+/// 整改轮 #13）。读取失败一律忽略——对端可能已消失，正在传播的传输错误优先。
+async fn drain_closing_response(stream: &mut AsyncNativeTlsFtpStream) {
+    let _ = tokio::time::timeout(
+        cancel::IDLE_TIMEOUT,
+        stream.read_response_in(&[
             suppaftp::Status::ClosingDataConnection,
             suppaftp::Status::RequestedFileActionOk,
             suppaftp::Status::TransferAborted,
-        ])
-        .await;
+        ]),
+    )
+    .await;
 }
 
 /// Build the TLS connector handed to `into_secure`.
@@ -332,4 +383,3 @@ fn tls_host(addr: &str) -> Result<&str> {
     }
     Ok(host)
 }
-

@@ -39,7 +39,7 @@ pub(crate) const MAX_UPLOAD_BYTES: u64 = 4 * 1024 * 1024 * 1024;
 ///
 /// Without this check any same-LAN host could race a spoofed first reply and
 /// `connect()` the client socket to itself: content injection on RRQ, data
-/// exfiltration on WRQ (review 2026-10-08 #2). Pure function, unit-tested.
+/// exfiltration on WRQ (review 2026-10-09 #2). Pure function, unit-tested.
 pub(crate) fn first_reply_is_from_request_host(server: &str, peer: std::net::SocketAddr) -> bool {
     use std::net::ToSocketAddrs;
     match server.to_socket_addrs() {

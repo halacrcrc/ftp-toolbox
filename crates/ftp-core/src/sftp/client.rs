@@ -365,7 +365,23 @@ impl SftpClient {
             &progress,
             TransferEvent::Started { kind: TransferKind::SftpUpload, file: remote.to_string(), total },
         );
-        let mut remote_file = self.sftp.create(remote).await.map_err(sftp_core_err)?;
+        // create 被拒（权限/路径不存在）是常见路径：Started 已发，必须补
+        // Error 事件，否则前端进度条卡死（2026-10-09 整改轮 #12）。
+        let mut remote_file = match self.sftp.create(remote).await {
+            Ok(f) => f,
+            Err(e) => {
+                let err = sftp_core_err(e);
+                TransferEvent::emit(
+                    &progress,
+                    TransferEvent::Error {
+                        kind: TransferKind::SftpUpload,
+                        file: remote.to_string(),
+                        message: error_chain(&err),
+                    },
+                );
+                return Err(err);
+            }
+        };
         let mut buf = vec![0u8; 64 * 1024];
         let mut sent: u64 = 0;
         let result = loop {

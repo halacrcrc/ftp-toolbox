@@ -132,7 +132,7 @@ async fn chunk_bounded<T>(
 mod tests {
     use super::*;
 
-    /// 关键不变量（review 2026-10-08 测试缺口 #6）：token=None 时 chunk 必须
+    /// 关键不变量（review 2026-10-09 测试缺口 #6）：token=None 时 chunk 必须
     /// 等价于裸 await —— 正常完成的 future 原样返回，不引入任何额外错误。
     #[tokio::test]
     async fn chunk_without_token_behaves_like_plain_await() {
@@ -154,7 +154,10 @@ mod tests {
         .await
         .unwrap_err();
         assert!(matches!(err, Error::Timeout), "{err:?}");
-        assert!(started.elapsed() < Duration::from_secs(5), "必须按时返回，而不是等 future 结束");
+        assert!(
+            started.elapsed() < Duration::from_secs(5),
+            "必须按时返回，而不是等 future 结束"
+        );
     }
 
     #[tokio::test]
@@ -163,9 +166,13 @@ mod tests {
         token.cancel();
         // 用永不完成的 future：select 两个分支同时就绪时随机胜出（立即完成的
         // future 可能抢先返回 Ok），只有 pending 才能让取消成为唯一出路。
-        let err = chunk_bounded(Some(&token), Duration::from_secs(60), std::future::pending::<()>())
-            .await
-            .unwrap_err();
+        let err = chunk_bounded(
+            Some(&token),
+            Duration::from_secs(60),
+            std::future::pending::<()>(),
+        )
+        .await
+        .unwrap_err();
         assert!(matches!(err, Error::Cancelled), "{err:?}");
     }
 
@@ -173,7 +180,8 @@ mod tests {
     async fn cancelled_resolves_once_token_fires() {
         let token = CancellationToken::new();
         // 未取消时 pending（用短超时证明它没有立即完成）
-        let pending = tokio::time::timeout(Duration::from_millis(10), cancelled(Some(&token))).await;
+        let pending =
+            tokio::time::timeout(Duration::from_millis(10), cancelled(Some(&token))).await;
         assert!(pending.is_err(), "未取消时 cancelled 不得完成");
         // 取消后立即完成
         token.cancel();

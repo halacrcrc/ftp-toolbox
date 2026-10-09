@@ -90,7 +90,7 @@ async fn pasv_data_channel_round_trip() {
 /// 服务器在数据连接关闭后仍会在控制通道上回一行收尾响应（226/426）；
 /// 正常路径由 suppaftp 的 finalize_* 读取排空，取消路径由客户端自己负责。
 /// 漏读这一行会让它滞留在响应缓冲里，下一条命令把它当成自己的应答 →
-/// `UnexpectedResponse`，且错位持续传导（评审 2026-10-08 #1）。
+/// `UnexpectedResponse`，且错位持续传导（评审 2026-10-09 #1）。
 #[tokio::test]
 async fn cancelled_transfer_leaves_control_channel_usable() {
     let root = temp_path("cancel-root", 1);
@@ -109,14 +109,20 @@ async fn cancelled_transfer_leaves_control_channel_usable() {
     token.cancel();
 
     // 先正常上传一个文件，供后面的取消下载使用
-    client.upload(&local_up, "real.bin", None, None).await.unwrap();
+    client
+        .upload(&local_up, "real.bin", None, None)
+        .await
+        .unwrap();
 
     // 取消上传：必须报 Cancelled，且控制通道不能失步
     let err = client
         .upload(&local_up, "cancelled.bin", None, Some(token.clone()))
         .await
         .unwrap_err();
-    assert!(matches!(err, ftp_core::Error::Cancelled), "期望 Cancelled，得到 {err:?}");
+    assert!(
+        matches!(err, ftp_core::Error::Cancelled),
+        "期望 Cancelled，得到 {err:?}"
+    );
     client
         .list(None)
         .await
@@ -128,7 +134,10 @@ async fn cancelled_transfer_leaves_control_channel_usable() {
         .download("real.bin", &local_down, None, Some(token))
         .await
         .unwrap_err();
-    assert!(matches!(err, ftp_core::Error::Cancelled), "期望 Cancelled，得到 {err:?}");
+    assert!(
+        matches!(err, ftp_core::Error::Cancelled),
+        "期望 Cancelled，得到 {err:?}"
+    );
     assert!(!local_down.exists(), "取消的下载不得产出目标文件");
     client
         .list(None)

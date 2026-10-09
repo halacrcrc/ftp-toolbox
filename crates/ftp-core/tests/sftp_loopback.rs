@@ -74,7 +74,9 @@ async fn start_server(
 ) -> (SftpServerHandle, PathBuf, PathBuf, broadcast::Sender<()>) {
     let app_data = temp_dir(tag);
     let root = temp_dir(&format!("{tag}-root"));
-    let (handle, shutdown) = start_server_at(&app_data, &root, 0, read_only).await.unwrap();
+    let (handle, shutdown) = start_server_at(&app_data, &root, 0, read_only)
+        .await
+        .unwrap();
     (handle, app_data, root, shutdown)
 }
 
@@ -123,7 +125,11 @@ async fn sftp_roundtrip_upload_download() {
 
     // TOFU：首连信任必须落盘，否则下一次连接又会被当成未知主机。
     let status = check_known_host(&app_data, &cfg.host, cfg.port, Some(client.fingerprint()));
-    assert_eq!(status.status, HostKeyState::Known, "首次信任后 known_hosts 应记录该指纹");
+    assert_eq!(
+        status.status,
+        HostKeyState::Known,
+        "首次信任后 known_hosts 应记录该指纹"
+    );
 
     let empty = client.list("/").await.unwrap();
     assert!(empty.is_empty(), "全新的共享目录应为空: {empty:?}");
@@ -133,7 +139,10 @@ async fn sftp_roundtrip_upload_download() {
     let src = src_dir.join("payload.bin");
     let bytes = payload(1, 1024 * 1024);
     std::fs::write(&src, &bytes).unwrap();
-    client.upload_file(&src, "/payload.bin", None, None).await.unwrap();
+    client
+        .upload_file(&src, "/payload.bin", None, None)
+        .await
+        .unwrap();
 
     let listed = client.list("/").await.unwrap();
     let entry = listed
@@ -141,13 +150,20 @@ async fn sftp_roundtrip_upload_download() {
         .find(|e| e.name == "payload.bin")
         .unwrap_or_else(|| panic!("上传后应能列出该文件: {listed:?}"));
     assert_eq!(entry.file_type, "file", "普通文件不应被报成目录");
-    assert_eq!(entry.size, bytes.len() as u64, "列表里的大小应等于实际字节数");
+    assert_eq!(
+        entry.size,
+        bytes.len() as u64,
+        "列表里的大小应等于实际字节数"
+    );
     assert!(entry.mtime.is_some(), "服务端应回传 mtime");
 
     // Download back and compare byte for byte.
     let dst_dir = temp_dir("roundtrip-dst");
     let dst = dst_dir.join("payload.bin");
-    client.download_file("/payload.bin", &dst, None, None).await.unwrap();
+    client
+        .download_file("/payload.bin", &dst, None, None)
+        .await
+        .unwrap();
     let got = std::fs::read(&dst).unwrap();
     assert_eq!(got.len(), bytes.len(), "下载长度不一致");
     assert!(got == bytes, "下载内容不一致");
@@ -197,11 +213,18 @@ async fn sftp_fetch_host_fingerprint_without_auth() {
         .await
         .expect("探针应能取到在线指纹");
     assert!(fp.starts_with("SHA256:"), "指纹应是 OpenSSH 形式: {fp}");
-    assert_eq!(fp, handle.host_key.fingerprint, "探针指纹应等于服务端主机密钥指纹");
+    assert_eq!(
+        fp, handle.host_key.fingerprint,
+        "探针指纹应等于服务端主机密钥指纹"
+    );
 
     // 探针不写 known_hosts：check 仍应回答 unknown。
     let status = check_known_host(&app_data, "127.0.0.1", handle.port, Some(&fp));
-    assert_eq!(status.status, HostKeyState::Unknown, "探针不应污染 known_hosts");
+    assert_eq!(
+        status.status,
+        HostKeyState::Unknown,
+        "探针不应污染 known_hosts"
+    );
     assert_eq!(status.fingerprint.as_deref(), Some(fp.as_str()));
 
     handle.stop().await;
@@ -229,13 +252,19 @@ async fn sftp_changed_host_key_is_rejected() {
 
     // 换一把主机密钥：同一个 host 现在出示另一把钥匙。
     let regenerated = ftp_core::sftp::regenerate_host_key(&app_data).unwrap();
-    assert_ne!(regenerated.fingerprint, first, "重新生成的主机密钥指纹必须变化");
+    assert_ne!(
+        regenerated.fingerprint, first,
+        "重新生成的主机密钥指纹必须变化"
+    );
 
     // 同一个 host:port 重启：known_hosts 以 `host:port` 为键，端口换了就变成
     // “另一台主机”，测不到 changed 分支。
     let (handle2, _shutdown2) = restart_on_port(&app_data, &root, handle_port).await;
     assert_eq!(handle2.port, handle_port);
-    let cfg2 = SftpClientConfig { port: handle2.port, ..cfg };
+    let cfg2 = SftpClientConfig {
+        port: handle2.port,
+        ..cfg
+    };
 
     // 即使 trust_new_host=true，changed 也必须硬失败（§2.4）。
     // `expect_err` would need `SftpClient: Debug`, which it deliberately
@@ -245,22 +274,23 @@ async fn sftp_changed_host_key_is_rejected() {
         Err(e) => e,
     };
     match &err {
-        ConnectError::ChangedHostKey { presented, recorded } => {
+        ConnectError::ChangedHostKey {
+            presented,
+            recorded,
+        } => {
             assert_eq!(presented, &regenerated.fingerprint, "应上报当前出示的指纹");
             assert_eq!(recorded, &first, "应上报此前记录的指纹");
         }
         other => panic!("期望 ConnectError::ChangedHostKey，实际: {other}"),
     }
-    assert!(err.to_string().contains("不一致"), "错误文案应说明指纹变化: {err}");
+    assert!(
+        err.to_string().contains("不一致"),
+        "错误文案应说明指纹变化: {err}"
+    );
 
     // 只有显式的「更新主机密钥记录」才放行。
-    ftp_core::sftp::update_known_host(
-        &app_data,
-        &cfg2.host,
-        cfg2.port,
-        &regenerated.fingerprint,
-    )
-    .unwrap();
+    ftp_core::sftp::update_known_host(&app_data, &cfg2.host, cfg2.port, &regenerated.fingerprint)
+        .unwrap();
     let client2 = SftpClient::connect(cfg2, &app_data, false)
         .await
         .expect("更新记录后，即使不再勾选信任也应放行");
@@ -290,12 +320,17 @@ async fn sftp_read_only_rejects_writes() {
     // 读路径正常：列表 + 下载。
     let listed = client.list("/").await.unwrap();
     assert!(
-        listed.iter().any(|e| e.name == "seed.txt" && e.file_type == "file"),
+        listed
+            .iter()
+            .any(|e| e.name == "seed.txt" && e.file_type == "file"),
         "只读服务器应能列出已有文件: {listed:?}"
     );
     let dst_dir = temp_dir("readonly-dst");
     let dst = dst_dir.join("seed.txt");
-    client.download_file("/seed.txt", &dst, None, None).await.unwrap();
+    client
+        .download_file("/seed.txt", &dst, None, None)
+        .await
+        .unwrap();
     assert_eq!(std::fs::read(&dst).unwrap(), seed, "只读下载的内容应一致");
 
     // 写路径被拒。
@@ -350,7 +385,10 @@ async fn sftp_cancelled_transfers_report_cancelled_and_keep_session_usable() {
         .upload_file(&src, "/upload.bin", None, Some(token))
         .await
         .unwrap_err();
-    assert!(matches!(err, ftp_core::Error::Cancelled), "期望 Cancelled，得到 {err:?}");
+    assert!(
+        matches!(err, ftp_core::Error::Cancelled),
+        "期望 Cancelled，得到 {err:?}"
+    );
     let dst_probe = temp_dir("cancel-probe");
     client.list("/").await.expect("取消上传后会话必须仍可用");
 
@@ -362,12 +400,18 @@ async fn sftp_cancelled_transfers_report_cancelled_and_keep_session_usable() {
         .download_file("/seed.txt", &dst, None, Some(token))
         .await
         .unwrap_err();
-    assert!(matches!(err, ftp_core::Error::Cancelled), "期望 Cancelled，得到 {err:?}");
+    assert!(
+        matches!(err, ftp_core::Error::Cancelled),
+        "期望 Cancelled，得到 {err:?}"
+    );
     assert!(!dst.exists(), "取消的下载不得产出目标文件");
     // 引擎的 .part 命名是 os_str.push(".part")，不是 with_extension
     let mut part_os = dst.as_os_str().to_os_string();
     part_os.push(".part");
-    assert!(!std::path::PathBuf::from(part_os).exists(), "不得留下 .part");
+    assert!(
+        !std::path::PathBuf::from(part_os).exists(),
+        "不得留下 .part"
+    );
     client.list("/").await.expect("取消下载后会话必须仍可用");
 
     client.disconnect().await.unwrap();

@@ -53,7 +53,7 @@ pub async fn download(
     'attempts: for _ in 0..MAX_RETRIES {
         // 握手期逐包校验来源：同网段第三方可以抢在真服务器之前发伪造应答，
         // 下面的 connect() 会把 socket 导向它 —— RRQ 内容注入 / WRQ 数据外泄
-        // （review 2026-10-08 #2）。RFC 1350 应答来自新 TID，端口必不同，
+        // （review 2026-10-09 #2）。RFC 1350 应答来自新 TID，端口必不同，
         // 只能比对来源 IP。
         let (n, peer) = loop {
             let received = tokio::select! {
@@ -71,7 +71,11 @@ pub async fn download(
                     debug!(%bogus, "tftp: 忽略来自非请求主机的首包（不重传请求，真应答可能已在路上）");
                     continue;
                 }
-                Ok(Err(e)) => return Err(e.into()),
+                Ok(Err(e)) => {
+                    let err = Error::from(e);
+                    emit_err(&progress, TransferKind::Download, &name, &err);
+                    return Err(err);
+                }
                 Err(_) => {
                     sock.send_to(&rrq, server).await?; // server may have missed our request
                     continue 'attempts;
@@ -79,8 +83,22 @@ pub async fn download(
             }
         };
         {
-            sock.connect(peer).await?;
-                match Packet::decode(&buf[..n])? {
+            if let Err(e) = sock.connect(peer).await {
+                let err = Error::Io(e);
+                emit_err(&progress, TransferKind::Download, &name, &err);
+                return Err(err);
+            }
+            // Started 已在握手成功后才发，但 Error 事件必须覆盖握手期失败，
+            // 否则前端进度条卡死（2026-10-09 整改轮 #12）。
+            let first = match Packet::decode(&buf[..n]) {
+                Ok(p) => p,
+                Err(e) => {
+                    let err = Error::from(e);
+                    emit_err(&progress, TransferKind::Download, &name, &err);
+                    return Err(err);
+                }
+            };
+            match first {
                 Packet::Oack { options } => {
                     if let Some(b) = negotiated_blksize(&options) {
                         blksize = b;
@@ -106,7 +124,7 @@ pub async fn download(
                     emit_err(&progress, TransferKind::Download, &name, &err);
                     return Err(err);
                 }
-                }
+            }
         }
     }
     if !handshook {
@@ -142,7 +160,7 @@ pub async fn download(
             received += data.len() as u64;
             sock.send(&Packet::Ack { block: 1 }.encode()).await?;
             // 经典路径也要发 Progress：单块小文件不能只有 Started/Done
-            // （review 2026-10-08 #6）。
+            // （review 2026-10-09 #6）。
             TransferEvent::emit(
                 &progress,
                 TransferEvent::Progress {
@@ -160,7 +178,10 @@ pub async fn download(
         }
 
         // ---- main receive loop ----
-        let mut last_ack = Packet::Ack { block: want.wrapping_sub(1) }.encode();
+        let mut last_ack = Packet::Ack {
+            block: want.wrapping_sub(1),
+        }
+        .encode();
         loop {
             cancel::check(cancel.as_ref())?;
             let data = match await_block(&sock, want, &last_ack, &mut buf, cancel.as_ref()).await {
@@ -201,7 +222,11 @@ pub async fn download(
             }
             TransferEvent::emit(
                 &progress,
-                TransferEvent::Done { kind: TransferKind::Download, file: name, bytes: received },
+                TransferEvent::Done {
+                    kind: TransferKind::Download,
+                    file: name,
+                    bytes: received,
+                },
             );
             Ok(())
         }
@@ -271,7 +296,11 @@ pub async fn upload(
                     debug!(%bogus, "tftp: 忽略来自非请求主机的首包（不重传请求，真应答可能已在路上）");
                     continue;
                 }
-                Ok(Err(e)) => return Err(e.into()),
+                Ok(Err(e)) => {
+                    let err = Error::from(e);
+                    emit_err(&progress, TransferKind::Upload, &name, &err);
+                    return Err(err);
+                }
                 Err(_) => {
                     sock.send_to(&wrq, server).await?;
                     continue 'attempts;
@@ -279,8 +308,20 @@ pub async fn upload(
             }
         };
         {
-            sock.connect(peer).await?;
-                match Packet::decode(&buf[..n])? {
+            if let Err(e) = sock.connect(peer).await {
+                let err = Error::Io(e);
+                emit_err(&progress, TransferKind::Upload, &name, &err);
+                return Err(err);
+            }
+            let first = match Packet::decode(&buf[..n]) {
+                Ok(p) => p,
+                Err(e) => {
+                    let err = Error::from(e);
+                    emit_err(&progress, TransferKind::Upload, &name, &err);
+                    return Err(err);
+                }
+            };
+            match first {
                 Packet::Oack { options } => {
                     if let Some(b) = negotiated_blksize(&options) {
                         blksize = b;
@@ -298,12 +339,11 @@ pub async fn upload(
                     return Err(err);
                 }
                 other => {
-                    let err =
-                        Error::TftpProtocol(format!("expected OACK or ACK 0, got {other:?}"));
+                    let err = Error::TftpProtocol(format!("expected OACK or ACK 0, got {other:?}"));
                     emit_err(&progress, TransferKind::Upload, &name, &err);
                     return Err(err);
                 }
-                }
+            }
         }
     }
     if !handshook {
@@ -321,7 +361,7 @@ pub async fn upload(
             return Err(e);
         }
         // 本地文件读也走 chunk（取消 + 空闲上界），与"每个分块操作都有上界"
-        // 的模块承诺一致（review 2026-10-08 #5）。
+        // 的模块承诺一致（review 2026-10-09 #5）。
         let n = match cancel::chunk(cancel.as_ref(), file.read(&mut chunk)).await {
             Ok(r) => r?,
             Err(e) => {
@@ -329,7 +369,11 @@ pub async fn upload(
                 return Err(e);
             }
         };
-        let packet = Packet::Data { block, data: chunk[..n].to_vec() }.encode();
+        let packet = Packet::Data {
+            block,
+            data: chunk[..n].to_vec(),
+        }
+        .encode();
         sock.send(&packet).await?;
 
         if let Err(e) = await_ack(&sock, block, &packet, &mut buf, cancel.as_ref()).await {
@@ -350,7 +394,11 @@ pub async fn upload(
         if n < blksize {
             TransferEvent::emit(
                 &progress,
-                TransferEvent::Done { kind: TransferKind::Upload, file: name, bytes: sent },
+                TransferEvent::Done {
+                    kind: TransferKind::Upload,
+                    file: name,
+                    bytes: sent,
+                },
             );
             return Ok(());
         }
@@ -432,6 +480,10 @@ async fn await_ack(
 fn emit_err(tx: &Option<ProgressTx>, kind: TransferKind, file: &str, err: &Error) {
     TransferEvent::emit(
         tx,
-        TransferEvent::Error { kind, file: file.to_string(), message: err.to_string() },
+        TransferEvent::Error {
+            kind,
+            file: file.to_string(),
+            message: err.to_string(),
+        },
     );
 }

@@ -152,7 +152,9 @@ async fn handle_session(root: Arc<PathBuf>, peer: SocketAddr, first: Packet) -> 
     sock.connect(peer).await?;
 
     match first {
-        Packet::Rrq { filename, options, .. } => {
+        Packet::Rrq {
+            filename, options, ..
+        } => {
             let blksize = negotiated_blksize(&options);
             let want_tsize = requests_tsize(&options);
             let effective = blksize.unwrap_or(BLOCK_SIZE);
@@ -183,7 +185,9 @@ async fn handle_session(root: Arc<PathBuf>, peer: SocketAddr, first: Packet) -> 
             }
             send_file(&sock, opened, effective).await
         }
-        Packet::Wrq { filename, options, .. } => {
+        Packet::Wrq {
+            filename, options, ..
+        } => {
             let blksize = negotiated_blksize(&options);
             let effective = blksize.unwrap_or(BLOCK_SIZE);
             info!(%peer, file = %filename, blksize = effective, "tftp WRQ: client wants to upload");
@@ -230,7 +234,13 @@ fn resolve(root: &Path, name: &str) -> Result<PathBuf> {
 
 async fn send_error(sock: &UdpSocket, code: u16, msg: &str) {
     let _ = sock
-        .send(&Packet::Error { code, msg: msg.to_string() }.encode())
+        .send(
+            &Packet::Error {
+                code,
+                msg: msg.to_string(),
+            }
+            .encode(),
+        )
         .await;
 }
 
@@ -294,13 +304,15 @@ async fn open_rrq(
     name: &str,
 ) -> std::result::Result<(PathBuf, File, u64), (u16, String, Error)> {
     // 穿越拒绝回 2（Access violation）而非 1（File not found）：既贴合错误码
-    // 语义，也不向对端泄露"文件是否存在"（review 2026-10-08 #9，设计取舍）。
+    // 语义，也不向对端泄露"文件是否存在"（review 2026-10-09 #9，设计取舍）。
     let path = resolve(root, name).map_err(|e| (2u16, "Access violation".to_string(), e))?;
     match File::open(&path).await {
         Ok(file) => {
-            let size = file.metadata().await.map_err(|e| {
-                (2u16, "Access violation".to_string(), Error::Io(e))
-            })?.len();
+            let size = file
+                .metadata()
+                .await
+                .map_err(|e| (2u16, "Access violation".to_string(), Error::Io(e)))?
+                .len();
             Ok((path, file, size))
         }
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
@@ -319,7 +331,11 @@ async fn send_file(sock: &UdpSocket, opened: (PathBuf, File, u64), blksize: usiz
     let mut total: u64 = 0;
     loop {
         let n = file.read(&mut buf).await?;
-        let packet = Packet::Data { block, data: buf[..n].to_vec() }.encode();
+        let packet = Packet::Data {
+            block,
+            data: buf[..n].to_vec(),
+        }
+        .encode();
         sock.send(&packet).await?;
         await_ack(sock, block, &packet, blksize).await?;
         total += n as u64;

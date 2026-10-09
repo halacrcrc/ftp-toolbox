@@ -3,7 +3,7 @@ This file provides guidance to CodeBuddy when working with code in this reposito
 
 ## 项目概览
 
-**ftp-toolbox**：基于 Tauri v2 + React + Rust 的 FTP / FTPS / SFTP / TFTP 服务器与客户端一体 Windows 桌面工具。当前版本 0.3.3，MIT OR Apache-2.0 双许可。设计规格与决策记录在 `docs/`（如 `docs/sftp-design.md` 的 SFTP Q1–Q12 取舍）；评审/交接/验证报告在 `deliverables/software-company/`；代码审查的分级标准、审查节点与红线清单在 `docs/code-review.md`（改代码前先过一遍）。
+**ftp-toolbox**：基于 Tauri v2 + React + Rust 的 FTP / FTPS / SFTP / TFTP 服务器与客户端一体 Windows 桌面工具。当前版本 0.3.4，MIT OR Apache-2.0 双许可。设计规格与决策记录在 `docs/`（如 `docs/sftp-design.md` 的 SFTP Q1–Q12 取舍）；代码审查的分级标准、审查节点与红线清单在 `docs/code-review.md`（改代码前先过一遍）。
 
 ## 常用命令
 

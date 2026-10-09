@@ -136,7 +136,7 @@ export default function FtpClientView({
         {ftps && acceptInvalidCerts && (
           <div className="hint-line warn">
             ⚠ 勾选「接受自签/无效证书」后将不校验服务器身份，连接可能被中间人冒充；
-            只建议在自测或信任的局域网内使用。对端证书指纹可在服务器页面查看。
+            只建议在自测或信任的局域网内使用。对端证书指纹可在左侧服务器卡的「证书详情」中查看。
           </div>
         )}
         <div className="actions">

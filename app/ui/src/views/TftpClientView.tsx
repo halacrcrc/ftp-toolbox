@@ -36,7 +36,7 @@ export default function TftpClientView({
   };
 
   return (
-    <div className="card" style={{ maxWidth: 640 }}>
+    <div className="card">
       <div className="card-head">
         <div>
           <div className="card-title">TFTP 传输</div>

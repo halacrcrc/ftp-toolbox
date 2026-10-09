@@ -148,13 +148,15 @@ button {
   /* min(360px, 100%) 防止容器窄于 360px 时轨道溢出（浏览器对 minmax 下限的经典坑） */
   grid-template-columns: repeat(auto-fit, minmax(min(360px, 100%), 1fr));
   gap: 16px;
+  /* 侧栏按协议重组后每页 = 服务器卡 + 客户端卡两列，两卡高度天然不同；
+     start 让各自保持自然高度，不被拉伸到与另一列等高 */
+  align-items: start;
 }
 
 .stack {
   display: flex;
   flex-direction: column;
   gap: 16px;
-  max-width: 760px;
 }
 
 .card {

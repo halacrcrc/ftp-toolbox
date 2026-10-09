@@ -49,11 +49,29 @@
 2. **Roadmap 两项**（README 挂账）：
    - FTP 远端文件树浏览（拖拽上传/下载）—— UI 工作量大，建议先做 `docs/` 规格；
    - SFTP 客户端公钥认证——规格变更，先定私钥来源（`docs/sftp-design.md` Q5 上下文）。
-3. **小尾巴已办**：`app/ui/src/components/ProgressBar.tsx` 进度文案刻意见空格处的
+3. **侧栏按协议重组（用户已定方向、待实施，2026-10-09 评估）**：
+   侧栏从「服务器 / FTP 客户端 / TFTP 客户端 / SFTP 客户端 / 运行日志」5 项改为
+   「FTP / TFTP / SFTP / 运行日志」4 项；每个协议页 = 左侧服务器卡 + 右侧客户端卡
+   （复用 `.grid-2`，加 `align-items: start` 保持卡片自然高度），日志页不动。
+   纯前端、评估约半天，无 Rust/IPC/localStorage 迁移/测试影响（`node --test`
+   只覆盖 `src/lib`）。实施要点：
+   - `app/ui/src/components/Sidebar.tsx`：`ViewKey` 改 `"ftp" | "tftp" | "sftp" | "logs"`，
+     ITEMS 减为 4 项，图标复用；
+   - `app/ui/src/App.tsx`：`TITLES`、默认视图、按协议页只刷新本协议的
+     `*_server_status`（单个接口已存在）；服务器运行态仍留在 App（页面切换会卸载）；
+   - `app/ui/src/views/ServersView.tsx` 拆分（主要工作）：抽 `useInterfaces(log)`
+     网卡轮询 hook、导出 `ServerCard`（或移到 components/）、三张卡的协议特定配置
+     （`onStart` 闭包、portHint 等）分别搬进三个新协议页；
+   - 客户端三视图去宽度限制：Ftp/SftpClientView 的 `.stack`（760px 上限）、
+     TftpClientView 内联 `maxWidth: 640`；SFTP 主机密钥模态框不受影响；
+   - `app/ui/src/styles.css`：复用 `.grid-2` + `align-items: start`；
+   - 文案：FtpClientView「对端证书指纹可在服务器页面查看」改为指向左侧服务器卡；
+   - 验证：`npm run typecheck` + `npm test` + `npm run dev` 冒烟；发版才需重新打包。
+4. **小尾巴已办**：`app/ui/src/components/ProgressBar.tsx` 进度文案刻意见空格处的
    注释已补（评审 #8，`a75f150`），防后人误删引发粘连。
-4. **记录为取舍、勿当 bug 修**：TFTP 握手伪造包计数并入 `MAX_RETRIES`（整改轮 #18）；
+5. **记录为取舍、勿当 bug 修**：TFTP 握手伪造包计数并入 `MAX_RETRIES`（整改轮 #18）；
    排队期取消按钮可见性（#19）；v0.2.2 / v0.2.4 永不补发。
-5. **可选清理**：外部 target 目录里 0.3.4 遗留的陈旧 `ftp_toolbox_app_lib.dll` 仍在
+6. **可选清理**：外部 target 目录里 0.3.4 遗留的陈旧 `ftp_toolbox_app_lib.dll` 仍在
    （本会话沙箱不允许写该目录，仅记录在案；换机器/清缓存时会自然消失）。
 
 ## Relevant artifacts

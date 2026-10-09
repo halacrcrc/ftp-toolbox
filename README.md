@@ -14,8 +14,8 @@
 
 Windows 安装包见 [Releases](https://github.com/halacrcrc/ftp-toolbox/releases/latest)：
 
-- `ftp-toolbox_0.3.5_x64-setup.exe` — NSIS 安装程序，向导式安装（推荐）
-- `ftp-toolbox_0.3.5_x64_en-US.msi` — MSI 安装包，适合批量部署
+- `ftp-toolbox_0.5.0_x64-setup.exe` — NSIS 安装程序，向导式安装（推荐）
+- `ftp-toolbox_0.5.0_x64_en-US.msi` — MSI 安装包，适合批量部署
 
 依赖系统自带 WebView2（Win10/11 通常已预装）。安装包未做代码签名，首次运行 SmartScreen 会提示「未知发布者」，点「仍要运行」即可。
 

@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import {
   api,
   pickFolder,
@@ -7,9 +7,8 @@ import {
   NetInterface,
   PassivePortCheck,
   ServerStatus,
-  SftpServerStatus,
 } from "../api";
-import FingerprintBlock from "../components/FingerprintBlock";
+import FingerprintBlock from "./FingerprintBlock";
 import { LogEntry } from "../App";
 
 type Log = (text: string, level?: LogEntry["level"]) => void;
@@ -17,9 +16,9 @@ type Log = (text: string, level?: LogEntry["level"]) => void;
 // Windows 优先的默认共享目录；其他平台没有 C 盘概念，留空让用户自填或用
 // 「浏览…」选择（后端启动前会校验目录存在性，空值会得到明确报错而非神秘失败）。
 const IS_WINDOWS = navigator.userAgent.includes("Windows");
-const DEFAULT_FTP_ROOT = IS_WINDOWS ? "C:\\ftp-root" : "";
-const DEFAULT_TFTP_ROOT = IS_WINDOWS ? "C:\\tftp-root" : "";
-const DEFAULT_SFTP_ROOT = IS_WINDOWS ? "C:\\sftp-root" : "";
+export const DEFAULT_FTP_ROOT = IS_WINDOWS ? "C:\\ftp-root" : "";
+export const DEFAULT_TFTP_ROOT = IS_WINDOWS ? "C:\\tftp-root" : "";
+export const DEFAULT_SFTP_ROOT = IS_WINDOWS ? "C:\\sftp-root" : "";
 
 // ---------- persisted per-server preferences ----------
 
@@ -98,7 +97,7 @@ function formatKeyLine(line: string): string {
 
 // ---------- server card ----------
 
-interface ServerCardProps {
+export interface ServerCardProps {
   /** storage namespace, e.g. "ftp" -> localStorage key "ftp-toolbox:server:ftp" */
   serverKey: string;
   title: string;
@@ -144,7 +143,7 @@ interface ServerCardProps {
   log: Log;
 }
 
-function ServerCard({
+export default function ServerCard({
   serverKey, title, desc, defaultRoot, defaultPort, portHint,
   withAuth, withPassive, defaultPassive = "", withFtps, withActiveMode, withSftp, hostKey: hostKeyProp,
   interfaces, interfacesLoaded, status, onStart, onStop, onRefresh, log,
@@ -770,164 +769,6 @@ function ServerCard({
           </button>
         )}
       </div>
-    </div>
-  );
-}
-
-// ---------- view ----------
-
-interface ServersViewProps {
-  log: Log;
-  ftpStatus: ServerStatus | null;
-  tftpStatus: ServerStatus | null;
-  sftpStatus: SftpServerStatus | null;
-  refresh: () => Promise<void>;
-}
-
-/**
- * 网卡列表的轮询周期。
- *
- * 枚举一次实测 p50≈4ms、尖峰 30-80ms，3s 一次的成本可以忽略；换来的是拔网线
- * 后最多 3s 下拉就更新 —— 对配置类控件而言足够「实时」，而且不依赖任何平台
- * 专有通知机制（Windows 的 NotifyIpInterfaceChange 只覆盖一个平台）。
- * 窗口不可见时不轮询；页面切走时组件卸载，effect 清理会直接停掉定时器。
- */
-const INTERFACE_POLL_MS = 3000;
-
-export default function ServersView({ log, ftpStatus, tftpStatus, sftpStatus, refresh }: ServersViewProps) {
-  const [interfaces, setInterfaces] = useState<NetInterface[]>([]);
-  // 「列表是否已经成功读到过」与「列表是不是空的」是两件事：枚举失败时
-  // `interfaces` 会是空数组，但那时说用户选的接口「已掉线」是错的。所以只有
-  // 成功读回来才敢下判断；一直没读到就维持原始的空下拉状态。
-  const [interfacesLoaded, setInterfacesLoaded] = useState(false);
-  // 只在列表真的变了才 setState：否则每次轮询都会重渲染（下拉会闪），
-  // 依赖 interfaces 的 effect 也会被无谓地重新触发。
-  // 后端已按 IP 稳定排序、字段顺序也固定，所以这份快照可以逐字比较。
-  const lastSnapshot = useRef("");
-  const pollFailed = useRef(false);
-
-  const loadInterfaces = useCallback(async () => {
-    try {
-      const next = await api.listInterfaces();
-      pollFailed.current = false;
-      setInterfacesLoaded(true);
-      const snapshot = JSON.stringify(next);
-      if (snapshot !== lastSnapshot.current) {
-        lastSnapshot.current = snapshot;
-        setInterfaces(next);
-      }
-    } catch (e) {
-      // 轮询失败只报一次，别把日志刷屏
-      if (!pollFailed.current) {
-        pollFailed.current = true;
-        log(`读取网卡列表失败: ${e}`, "error");
-      }
-    }
-  }, [log]);
-
-  // 网卡列表要跟着网线插拔走：挂载时拉一次，之后定时轮询，并在窗口重新获得
-  // 焦点 / 重新可见时立刻补拉，不必等下一个周期。
-  useEffect(() => {
-    void loadInterfaces();
-    const timer = setInterval(() => {
-      if (document.visibilityState === "hidden") return;
-      void loadInterfaces();
-    }, INTERFACE_POLL_MS);
-    const onWake = () => {
-      if (document.visibilityState === "visible") void loadInterfaces();
-    };
-    window.addEventListener("focus", onWake);
-    document.addEventListener("visibilitychange", onWake);
-    return () => {
-      clearInterval(timer);
-      window.removeEventListener("focus", onWake);
-      document.removeEventListener("visibilitychange", onWake);
-    };
-  }, [loadInterfaces]);
-
-  // 刷新按钮同时更新运行态和网卡列表（网卡 IP 会随网络环境变化）
-  const refreshAll = async () => {
-    await Promise.all([refresh(), loadInterfaces()]);
-  };
-
-  return (
-    <div className="grid-2">
-      <ServerCard
-        serverKey="ftp"
-        title="FTP 服务器"
-        desc="支持匿名或账号密码认证"
-        defaultRoot={DEFAULT_FTP_ROOT}
-        defaultPort="21"
-        portHint="默认 21"
-        withAuth
-        withPassive
-        withFtps
-        withActiveMode
-        // 与 ftp-core 的 DEFAULT_PASSIVE_PORTS (50000..50100) 保持一致
-        defaultPassive="50000-50099"
-        interfaces={interfaces}
-        interfacesLoaded={interfacesLoaded}
-        status={ftpStatus}
-        onStart={(root, addr, user, pass, passive, ftps, _sftp, allowActive) =>
-          api.startFtpServer(root, addr, user, pass, passive, ftps, allowActive)
-        }
-        onStop={api.stopFtpServer}
-        onRefresh={refreshAll}
-        log={log}
-      />
-      <ServerCard
-        serverKey="tftp"
-        title="TFTP 服务器"
-        desc="支持 blksize 协商（单传可达 500+ MB）"
-        defaultRoot={DEFAULT_TFTP_ROOT}
-        defaultPort="69"
-        portHint="默认 69"
-        interfaces={interfaces}
-        interfacesLoaded={interfacesLoaded}
-        status={tftpStatus}
-        onStart={(root, addr) => api.startTftpServer(root, addr)}
-        onStop={api.stopTftpServer}
-        onRefresh={refreshAll}
-        log={log}
-      />
-      <ServerCard
-        serverKey="sftp"
-        title="SFTP 服务器"
-        desc="SSH 文件传输；密码或公钥任一通过即可登录"
-        defaultRoot={DEFAULT_SFTP_ROOT}
-        defaultPort="2222"
-        portHint="默认 2222"
-        withSftp
-        interfaces={interfaces}
-        interfacesLoaded={interfacesLoaded}
-        status={sftpStatus}
-        hostKey={sftpStatus?.hostKey ?? null}
-        onStart={(root, addr, user, pass, _passive, _ftps, sftp) => {
-          // ServerCard 统一用 "iface:port" 传地址，SFTP 命令要分开的
-          // bindAddr/port —— 这里拆开（下拉里只有 IPv4，lastIndexOf 够用）
-          const i = addr.lastIndexOf(":");
-          const bindAddr = i < 0 ? addr : addr.slice(0, i);
-          const port = i < 0 ? 2222 : Number(addr.slice(i + 1)) || 2222;
-          return api
-            .startSftpServer({
-              bindAddr,
-              port,
-              username: user ?? "",
-              password: pass ?? "",
-              authorizedKeys: sftp?.authorizedKeys ?? [],
-              rootDir: root,
-              readOnly: sftp?.readOnly ?? false,
-            })
-            // 启动成功消息按契约不带指纹（Q12）；addr 若已含端口则不再重复拼
-            .then((info) => {
-              const target = info.addr.includes(":") ? info.addr : `${info.addr}:${info.port}`;
-              return `SFTP 服务器已启动：sftp://${target}`;
-            });
-        }}
-        onStop={api.stopSftpServer}
-        onRefresh={refreshAll}
-        log={log}
-      />
     </div>
   );
 }

@@ -1,6 +1,6 @@
 import iconUrl from "../assets/icon.png";
 
-export type ViewKey = "servers" | "ftp" | "tftp" | "sftp-client" | "logs";
+export type ViewKey = "ftp" | "tftp" | "sftp" | "logs";
 
 interface Props {
   active: ViewKey;
@@ -9,20 +9,8 @@ interface Props {
 
 const ITEMS: { key: ViewKey; label: string; icon: JSX.Element }[] = [
   {
-    key: "servers",
-    label: "服务器",
-    icon: (
-      <svg viewBox="0 0 16 16" width="16" height="16" fill="none" stroke="currentColor" strokeWidth="1.5">
-        <rect x="2" y="2" width="12" height="5" rx="1.5" />
-        <rect x="2" y="9" width="12" height="5" rx="1.5" />
-        <circle cx="5" cy="4.5" r="0.6" fill="currentColor" stroke="none" />
-        <circle cx="5" cy="11.5" r="0.6" fill="currentColor" stroke="none" />
-      </svg>
-    ),
-  },
-  {
     key: "ftp",
-    label: "FTP 客户端",
+    label: "FTP",
     icon: (
       <svg viewBox="0 0 16 16" width="16" height="16" fill="none" stroke="currentColor" strokeWidth="1.5">
         <path d="M2 4.5A1.5 1.5 0 0 1 3.5 3h3l1.5 2h4.5A1.5 1.5 0 0 1 14 6.5v5A1.5 1.5 0 0 1 12.5 13h-9A1.5 1.5 0 0 1 2 11.5v-7Z" />
@@ -31,7 +19,7 @@ const ITEMS: { key: ViewKey; label: string; icon: JSX.Element }[] = [
   },
   {
     key: "tftp",
-    label: "TFTP 客户端",
+    label: "TFTP",
     icon: (
       <svg viewBox="0 0 16 16" width="16" height="16" fill="none" stroke="currentColor" strokeWidth="1.5">
         <path d="M5 2v8m0 0L2.5 7.5M5 10l2.5-2.5M11 14V6m0 0 2.5 2.5M11 6 8.5 8.5" strokeLinecap="round" strokeLinejoin="round" />
@@ -39,8 +27,8 @@ const ITEMS: { key: ViewKey; label: string; icon: JSX.Element }[] = [
     ),
   },
   {
-    key: "sftp-client",
-    label: "SFTP 客户端",
+    key: "sftp",
+    label: "SFTP",
     icon: (
       // 终端提示符造型：SFTP 跑在 SSH 之上，与另外两个「文件夹/传输」图标区分开
       <svg viewBox="0 0 16 16" width="16" height="16" fill="none" stroke="currentColor" strokeWidth="1.5">

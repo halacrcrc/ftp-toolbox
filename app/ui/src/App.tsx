@@ -20,10 +20,9 @@ import {
 import type { Progress } from "./lib/transfer";
 import Sidebar, { ViewKey } from "./components/Sidebar";
 import ProgressBar from "./components/ProgressBar";
-import ServersView from "./views/ServersView";
-import FtpClientView from "./views/FtpClientView";
-import TftpClientView from "./views/TftpClientView";
-import SftpClientView from "./views/SftpClientView";
+import FtpPage from "./views/FtpPage";
+import TftpPage from "./views/TftpPage";
+import SftpPage from "./views/SftpPage";
 import LogView from "./views/LogView";
 
 export interface LogEntry {
@@ -34,10 +33,9 @@ export interface LogEntry {
 }
 
 const TITLES: Record<ViewKey, string> = {
-  servers: "服务器",
-  ftp: "FTP 客户端",
-  tftp: "TFTP 客户端",
-  "sftp-client": "SFTP 客户端",
+  ftp: "FTP",
+  tftp: "TFTP",
+  sftp: "SFTP",
   logs: "运行日志",
 };
 
@@ -46,7 +44,7 @@ const TITLES: Record<ViewKey, string> = {
 let nextLogId = 1;
 
 export default function App() {
-  const [view, setView] = useState<ViewKey>("servers");
+  const [view, setView] = useState<ViewKey>("ftp");
   const [logs, setLogs] = useState<LogEntry[]>([]);
   const [progress, setProgress] = useState<Progress | null>(null);
   // Read synchronously by the progress handler (see the effect below).
@@ -55,9 +53,9 @@ export default function App() {
   // views around their invoke; cleared when it settles). Non-null enables
   // the footer cancel button.
   const [activeTransferId, setActiveTransferId] = useState<string | null>(null);
-  // Server run state lives here (App never unmounts) and is always re-read from
-  // the backend when the servers page is opened — the pages themselves are
-  // mounted/unmounted on navigation, so component-local state would be lost.
+  // Server run state lives here (App never unmounts) and is re-read from the
+  // backend when the matching protocol page is opened — the pages themselves
+  // are mounted/unmounted on navigation, so component-local state would be lost.
   const [ftpStatus, setFtpStatus] = useState<ServerStatus | null>(null);
   const [tftpStatus, setTftpStatus] = useState<ServerStatus | null>(null);
   const [sftpStatus, setSftpStatus] = useState<SftpServerStatus | null>(null);
@@ -70,24 +68,37 @@ export default function App() {
     ]);
   }, []);
 
-  /** Ask the backend what is actually running (single source of truth). */
-  const refreshServers = useCallback(async () => {
-    const [ftp, tftp, sftp] = await Promise.allSettled([
-      api.ftpServerStatus(),
-      api.tftpServerStatus(),
-      api.sftpServerStatus(),
-    ]);
-    if (ftp.status === "fulfilled") setFtpStatus(ftp.value);
-    else log(`读取 FTP 服务器状态失败: ${ftp.reason}`, "error");
-    if (tftp.status === "fulfilled") setTftpStatus(tftp.value);
-    else log(`读取 TFTP 服务器状态失败: ${tftp.reason}`, "error");
-    if (sftp.status === "fulfilled") setSftpStatus(sftp.value);
-    else log(`读取 SFTP 服务器状态失败: ${sftp.reason}`, "error");
+  // Ask the backend what is actually running (single source of truth), one
+  // protocol at a time: each page only refreshes its own server status.
+  const refreshFtp = useCallback(async () => {
+    try {
+      setFtpStatus(await api.ftpServerStatus());
+    } catch (e) {
+      log(`读取 FTP 服务器状态失败: ${e}`, "error");
+    }
+  }, [log]);
+
+  const refreshTftp = useCallback(async () => {
+    try {
+      setTftpStatus(await api.tftpServerStatus());
+    } catch (e) {
+      log(`读取 TFTP 服务器状态失败: ${e}`, "error");
+    }
+  }, [log]);
+
+  const refreshSftp = useCallback(async () => {
+    try {
+      setSftpStatus(await api.sftpServerStatus());
+    } catch (e) {
+      log(`读取 SFTP 服务器状态失败: ${e}`, "error");
+    }
   }, [log]);
 
   useEffect(() => {
-    if (view === "servers") void refreshServers();
-  }, [view, refreshServers]);
+    if (view === "ftp") void refreshFtp();
+    else if (view === "tftp") void refreshTftp();
+    else if (view === "sftp") void refreshSftp();
+  }, [view, refreshFtp, refreshTftp, refreshSftp]);
 
   // Run state is *pushed* by the backend, so it stays correct without a manual
   // refresh: a server that dies on its own, or clients connecting and
@@ -187,19 +198,29 @@ export default function App() {
           <h1>{TITLES[view]}</h1>
         </header>
         <main className="content">
-          {view === "servers" && (
-            <ServersView
+          {view === "ftp" && (
+            <FtpPage
               log={log}
               ftpStatus={ftpStatus}
-              tftpStatus={tftpStatus}
-              sftpStatus={sftpStatus}
-              refresh={refreshServers}
+              refresh={refreshFtp}
+              onTransferChange={setActiveTransferId}
             />
           )}
-          {view === "ftp" && <FtpClientView log={log} onTransferChange={setActiveTransferId} />}
-          {view === "tftp" && <TftpClientView log={log} onTransferChange={setActiveTransferId} />}
-          {view === "sftp-client" && (
-            <SftpClientView log={log} onTransferChange={setActiveTransferId} />
+          {view === "tftp" && (
+            <TftpPage
+              log={log}
+              tftpStatus={tftpStatus}
+              refresh={refreshTftp}
+              onTransferChange={setActiveTransferId}
+            />
+          )}
+          {view === "sftp" && (
+            <SftpPage
+              log={log}
+              sftpStatus={sftpStatus}
+              refresh={refreshSftp}
+              onTransferChange={setActiveTransferId}
+            />
           )}
           {view === "logs" && <LogView logs={logs} onClear={() => setLogs([])} />}
         </main>

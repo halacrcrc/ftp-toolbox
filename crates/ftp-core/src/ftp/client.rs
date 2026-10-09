@@ -146,13 +146,27 @@ impl FtpClient {
                 Ok(())
             }
             Err(e) => {
-                // Abort the data channel promptly; dropping without close
-                // would leave the server waiting for more data until its own
-                // timeout. The control connection survives, but the session
-                // state after an aborted transfer is server-defined — the UI
-                // treats a cancelled upload as "reconnect if next command
-                // misbehaves".
+                // Abort the data channel, then drain the closing response the
+                // server sends once the data connection drops (226/426/550).
+                // finalize_put_stream does this read on the success path; the
+                // cancel path must do it too, or the line stays in the reader
+                // buffer and EVERY following command reads it first —
+                // UnexpectedResponse forever (review 2026-10-08 #1).
                 let _ = data.close().await;
+                drop(data);
+                let _ = self.stream.read_response_in(&[
+                    suppaftp::Status::ClosingDataConnection,
+                    suppaftp::Status::RequestedFileActionOk,
+                    suppaftp::Status::TransferAborted,
+                ]).await;
+                TransferEvent::emit(
+                    &progress,
+                    TransferEvent::Error {
+                        kind: TransferKind::Upload,
+                        file: name,
+                        message: e.to_string(),
+                    },
+                );
                 Err(e)
             }
         }
@@ -197,13 +211,13 @@ impl FtpClient {
             let mut received: u64 = 0;
             loop {
                 if let Err(e) = cancel::check(cancel.as_ref()) {
-                    let _ = data.close().await;
+                    abort_retr(&mut self.stream, &mut data).await;
                     return Err(e);
                 }
                 let n = match cancel::chunk(cancel.as_ref(), data.read(&mut buf)).await {
                     Ok(r) => r?,
                     Err(e) => {
-                        let _ = data.close().await;
+                        abort_retr(&mut self.stream, &mut data).await;
                         return Err(e);
                     }
                 };
@@ -246,6 +260,14 @@ impl FtpClient {
             }
             Err(e) => {
                 let _ = tokio::fs::remove_file(&part).await;
+                TransferEvent::emit(
+                    &progress,
+                    TransferEvent::Error {
+                        kind: TransferKind::Download,
+                        file: name,
+                        message: e.to_string(),
+                    },
+                );
                 Err(e)
             }
         }
@@ -254,6 +276,29 @@ impl FtpClient {
     pub async fn quit(mut self) -> Result<()> {
         Ok(self.stream.quit().await?)
     }
+}
+
+/// Close an aborted RETR data channel and drain the closing response the
+/// server sends on the control channel once it sees the drop (226/426/550).
+/// `finalize_retr_stream` performs this read on the success path; skipping it
+/// on the cancel path leaves the line in the response buffer and every later
+/// command reads it first — UnexpectedResponse forever (review 2026-10-08 #1).
+/// Read failures are ignored: the peer may already be gone, and the transfer
+/// error being propagated takes precedence regardless.
+async fn abort_retr<D>(stream: &mut AsyncNativeTlsFtpStream, data: &mut D)
+where
+    // suppaftp 未公开 `AsyncTlsStream`/`DataStream` 的可命名路径，这里按能力
+    // 约束泛型：调用点传入的 DataStream 必然满足（close 语义同 finalize）。
+    D: futures::io::AsyncWrite + Unpin,
+{
+    let _ = data.close().await;
+    let _ = stream
+        .read_response_in(&[
+            suppaftp::Status::ClosingDataConnection,
+            suppaftp::Status::RequestedFileActionOk,
+            suppaftp::Status::TransferAborted,
+        ])
+        .await;
 }
 
 /// Build the TLS connector handed to `into_secure`.

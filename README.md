@@ -14,8 +14,8 @@
 
 Windows 安装包见 [Releases](https://github.com/halacrcrc/ftp-toolbox/releases/latest)：
 
-- `ftp-toolbox_0.3.4_x64-setup.exe` — NSIS 安装程序，向导式安装（推荐）
-- `ftp-toolbox_0.3.4_x64_en-US.msi` — MSI 安装包，适合批量部署
+- `ftp-toolbox_0.3.5_x64-setup.exe` — NSIS 安装程序，向导式安装（推荐）
+- `ftp-toolbox_0.3.5_x64_en-US.msi` — MSI 安装包，适合批量部署
 
 依赖系统自带 WebView2（Win10/11 通常已预装）。安装包未做代码签名，首次运行 SmartScreen 会提示「未知发布者」，点「仍要运行」即可。
 
@@ -145,7 +145,7 @@ npm run typecheck        # tsc --noEmit
 ## Roadmap
 
 - [x] FTP over TLS（FTPS）— v0.2.5 落地
-- [x] TFTP `tsize` 协商（下载前获知文件大小，进度条可显示百分比）— v0.3.4 落地
+- [x] TFTP `tsize` 协商（下载前获知文件大小，进度条可显示百分比）— v0.3.3 落地
 - [ ] FTP 远端文件树浏览（拖拽上传/下载）
 - [ ] SFTP 客户端公钥认证（属规格变更，需先定私钥来源）
 

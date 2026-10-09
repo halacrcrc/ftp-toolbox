@@ -18,47 +18,20 @@ pub const MAX_BLKSIZE: usize = 65464;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Packet {
-    Rrq {
-        filename: String,
-        mode: String,
-        options: Vec<(String, String)>,
-    },
-    Wrq {
-        filename: String,
-        mode: String,
-        options: Vec<(String, String)>,
-    },
-    Data {
-        block: u16,
-        data: Vec<u8>,
-    },
-    Ack {
-        block: u16,
-    },
+    Rrq { filename: String, mode: String, options: Vec<(String, String)> },
+    Wrq { filename: String, mode: String, options: Vec<(String, String)> },
+    Data { block: u16, data: Vec<u8> },
+    Ack { block: u16 },
     /// Option acknowledgement (RFC 2347/2348).
-    Oack {
-        options: Vec<(String, String)>,
-    },
-    Error {
-        code: u16,
-        msg: String,
-    },
+    Oack { options: Vec<(String, String)> },
+    Error { code: u16, msg: String },
 }
 
 impl Packet {
     pub fn encode(&self) -> Vec<u8> {
         let mut out = Vec::new();
         match self {
-            Packet::Rrq {
-                filename,
-                mode,
-                options,
-            }
-            | Packet::Wrq {
-                filename,
-                mode,
-                options,
-            } => {
+            Packet::Rrq { filename, mode, options } | Packet::Wrq { filename, mode, options } => {
                 out.extend_from_slice(&self.opcode().to_be_bytes());
                 push_z(&mut out, filename);
                 push_z(&mut out, mode);
@@ -103,17 +76,9 @@ impl Packet {
                 let (mode, pos) = read_z(buf, pos).unwrap_or(("octet".into(), pos));
                 let options = parse_options(buf, pos);
                 if opcode == 1 {
-                    Ok(Packet::Rrq {
-                        filename,
-                        mode,
-                        options,
-                    })
+                    Ok(Packet::Rrq { filename, mode, options })
                 } else {
-                    Ok(Packet::Wrq {
-                        filename,
-                        mode,
-                        options,
-                    })
+                    Ok(Packet::Wrq { filename, mode, options })
                 }
             }
             3 => {
@@ -121,10 +86,7 @@ impl Packet {
                     return Err(Error::TftpProtocol("data packet too short".into()));
                 }
                 let block = u16::from_be_bytes([buf[2], buf[3]]);
-                Ok(Packet::Data {
-                    block,
-                    data: buf[4..].to_vec(),
-                })
+                Ok(Packet::Data { block, data: buf[4..].to_vec() })
             }
             4 => {
                 if buf.len() < 4 {
@@ -139,18 +101,13 @@ impl Packet {
                 }
                 let code = u16::from_be_bytes([buf[2], buf[3]]);
                 let msg_bytes = &buf[4..];
-                let end = msg_bytes
-                    .iter()
-                    .position(|&b| b == 0)
-                    .unwrap_or(msg_bytes.len());
+                let end = msg_bytes.iter().position(|&b| b == 0).unwrap_or(msg_bytes.len());
                 Ok(Packet::Error {
                     code,
                     msg: String::from_utf8_lossy(&msg_bytes[..end]).into_owned(),
                 })
             }
-            6 => Ok(Packet::Oack {
-                options: parse_options(buf, 2),
-            }),
+            6 => Ok(Packet::Oack { options: parse_options(buf, 2) }),
             other => Err(Error::TftpProtocol(format!("unknown opcode {other}"))),
         }
     }
@@ -246,32 +203,17 @@ mod tests {
     #[test]
     fn roundtrip_all_variants() {
         let cases = vec![
-            Packet::Rrq {
-                filename: "a.bin".into(),
-                mode: "octet".into(),
-                options: vec![],
-            },
+            Packet::Rrq { filename: "a.bin".into(), mode: "octet".into(), options: vec![] },
             Packet::Wrq {
                 filename: "b.bin".into(),
                 mode: "octet".into(),
-                options: vec![
-                    ("blksize".into(), "8192".into()),
-                    ("tsize".into(), "0".into()),
-                ],
+                options: vec![("blksize".into(), "8192".into()), ("tsize".into(), "0".into())],
             },
-            Packet::Data {
-                block: 7,
-                data: vec![1, 2, 3],
-            },
+            Packet::Data { block: 7, data: vec![1, 2, 3] },
             Packet::Ack { block: 65535 },
-            Packet::Oack {
-                options: vec![("blksize".into(), "8192".into())],
-            },
+            Packet::Oack { options: vec![("blksize".into(), "8192".into())] },
             Packet::Oack { options: vec![] },
-            Packet::Error {
-                code: 1,
-                msg: "File not found".into(),
-            },
+            Packet::Error { code: 1, msg: "File not found".into() },
         ];
         for p in cases {
             assert_eq!(Packet::decode(&p.encode()).unwrap(), p);
@@ -284,9 +226,7 @@ mod tests {
         raw.extend_from_slice(&1u16.to_be_bytes());
         raw.extend_from_slice(b"file.txt\0octet\0");
         match Packet::decode(&raw).unwrap() {
-            Packet::Rrq {
-                filename, options, ..
-            } => {
+            Packet::Rrq { filename, options, .. } => {
                 assert_eq!(filename, "file.txt");
                 assert!(options.is_empty());
             }
@@ -316,19 +256,10 @@ mod tests {
             Some(123456)
         );
         // non-numeric / absent -> None
-        assert_eq!(
-            negotiated_tsize(&[("tsize".to_string(), "abc".to_string())]),
-            None
-        );
-        assert_eq!(
-            negotiated_tsize(&[("blksize".to_string(), "8192".to_string())]),
-            None
-        );
+        assert_eq!(negotiated_tsize(&[("tsize".to_string(), "abc".to_string())]), None);
+        assert_eq!(negotiated_tsize(&[("blksize".to_string(), "8192".to_string())]), None);
         // presence detection independent of parseability
         assert!(requests_tsize(&[("TSIZE".to_string(), "junk".to_string())]));
-        assert!(!requests_tsize(&[(
-            "blksize".to_string(),
-            "512".to_string()
-        )]));
+        assert!(!requests_tsize(&[("blksize".to_string(), "512".to_string())]));
     }
 }

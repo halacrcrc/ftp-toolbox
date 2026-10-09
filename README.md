@@ -14,8 +14,8 @@
 
 Windows 安装包见 [Releases](https://github.com/halacrcrc/ftp-toolbox/releases/latest)：
 
-- `ftp-toolbox_0.3.3_x64-setup.exe` — NSIS 安装程序，向导式安装（推荐）
-- `ftp-toolbox_0.3.3_x64_en-US.msi` — MSI 安装包，适合批量部署
+- `ftp-toolbox_0.3.4_x64-setup.exe` — NSIS 安装程序，向导式安装（推荐）
+- `ftp-toolbox_0.3.4_x64_en-US.msi` — MSI 安装包，适合批量部署
 
 依赖系统自带 WebView2（Win10/11 通常已预装）。安装包未做代码签名，首次运行 SmartScreen 会提示「未知发布者」，点「仍要运行」即可。
 
@@ -60,8 +60,7 @@ app/ui             React 前端（Vite + TypeScript）
 
 核心库与 GUI 完全解耦：想换成 CLI、gpui 或别的壳，只需要替换 `app/`，核心代码一行不动。
 
-各模块的规格与决策记录见 `docs/`（如 `docs/sftp-design.md` 记了 SFTP 的 Q1–Q12 取舍）；
-评审、交接与验证报告归档在 `deliverables/software-company/`。
+各模块的规格与决策记录见 `docs/`（如 `docs/sftp-design.md` 记了 SFTP 的 Q1–Q12 取舍）。
 
 ## 快速开始
 
@@ -138,7 +137,7 @@ npm run typecheck        # tsc --noEmit
 ## Roadmap
 
 - [x] FTP over TLS（FTPS）— v0.2.5 落地
-- [x] TFTP `tsize` 协商（下载前获知文件大小，进度条可显示百分比）— v0.3.3 落地
+- [x] TFTP `tsize` 协商（下载前获知文件大小，进度条可显示百分比）— v0.3.4 落地
 - [ ] FTP 远端文件树浏览（拖拽上传/下载）
 - [ ] SFTP 客户端公钥认证（属规格变更，需先定私钥来源）
 

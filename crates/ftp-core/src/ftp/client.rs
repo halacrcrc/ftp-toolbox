@@ -128,7 +128,10 @@ impl FtpClient {
                 break Err(e);
             }
             let n = match cancel::chunk(cancel.as_ref(), file.read(&mut buf)).await {
-                Ok(r) => r?,
+                // 本地源读失败也必须走统一 Err 分支补发 Error 事件，不能 `?`
+                // 直接抛出（2026-10-09 事后审计 #23）。
+                Ok(Ok(n)) => n,
+                Ok(Err(e)) => break Err(Error::from(e)),
                 Err(e) => break Err(e),
             };
             if n == 0 {
@@ -183,7 +186,9 @@ impl FtpClient {
                 // cancel path must do it too, or the line stays in the reader
                 // buffer and EVERY following command reads it first —
                 // UnexpectedResponse forever (review 2026-10-09 #1).
-                let _ = data.close().await;
+                // 收尾的 close 也要设上界：对端不读时 close 可能挂住
+                // （2026-10-09 事后审计 #25），与下面的排空读同口径。
+                let _ = tokio::time::timeout(cancel::IDLE_TIMEOUT, data.close()).await;
                 drop(data);
                 drain_closing_response(&mut self.stream).await;
                 // 上面已发 Error 事件（含取消），这里直接传播错误。
@@ -332,7 +337,8 @@ where
     // 约束泛型：调用点传入的 DataStream 必然满足（close 语义同 finalize）。
     D: futures::io::AsyncWrite + Unpin,
 {
-    let _ = data.close().await;
+    // close 亦设上界：对端不读时可能挂住（2026-10-09 事后审计 #25）。
+    let _ = tokio::time::timeout(cancel::IDLE_TIMEOUT, data.close()).await;
     drain_closing_response(stream).await;
 }
 

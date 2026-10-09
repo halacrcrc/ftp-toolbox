@@ -84,6 +84,14 @@ ui/node_modules/.bin/tauri build
 
 > ⚠ 请用上面这个项目内的 CLI。`cargo tauri build` 走的是 `cargo install` 装的全局 `cargo-tauri`，它可能是 **1.x**，会拿 v1 的 schema 去校验这份 `tauri.conf.json`（v2 格式）并报一堆 `Additional property 'app' is not allowed`。
 
+> 发布时每个版本出两个 WebView2 变体：默认的 `downloadBootstrapper`（安装时在线下载 WebView2）之外，还要出一份引导器内嵌的离线变体：
+>
+> ```bash
+> node ui/node_modules/@tauri-apps/cli/tauri.js build --config src-tauri/tauri.conf.embed.json
+> ```
+>
+> 产物与默认包同名，出包后改名加 `-offline` 后缀再归档，两个变体都上传到 Releases。
+
 > 产物默认落在仓库内的 `target/release/bundle/{nsis,msi}/`（NSIS 出 `setup.exe`，WiX 出 `.msi`）。
 > 仓库根的 `dist/` 是发布用的归档目录，被 `.gitignore` 忽略 ——
 > **安装包不进版本库**，只用于手动上传到 GitHub Releases。

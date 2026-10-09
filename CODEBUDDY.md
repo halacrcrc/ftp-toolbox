@@ -108,6 +108,7 @@ app/ui                 React 18 + Vite + TS：api.ts 封装 invoke，views/ + co
 - **先提交再发版**：安装包一旦上传 Releases，对应源码必须已在 main 上（发版门禁详见 `docs/code-review.md`）；同版本号重复出 MSI 会报 1638。
 - 开发者/发布者固定 **halacrcrc**（tauri.conf.json bundle.publisher；exe CompanyName 与 MSI Manufacturer 均需核对）。
 - 前端改动必须重新打包（dist 内嵌二进制），出包约 1–6 分钟。
+- **每次发版要出两个 WebView2 变体**：默认 `tauri.conf.json` 是 downloadBootstrapper（在线装 WebView2）；再出一份 embedBootstrapper（引导器内嵌，离线机可用）——`app/src-tauri/tauri.conf.embed.json` 只覆写 `webviewInstallMode`，出包命令 `node <项目内 tauri.js> build --config src-tauri/tauri.conf.embed.json`（仍在 `app/` 目录）。两个变体产物同名，第二个出包后改名（加 `-offline` 后缀）再放 `dist/`，**两个都要上传 Release**。
 - 安装包不进版本库（仓库根 `dist/` 被 .gitignore 忽略），只上传 GitHub Releases。
 - 提交信息用 Conventional Commits 风格（英文）：`feat(sftp): ...`、`fix(tftp): ...`。
 

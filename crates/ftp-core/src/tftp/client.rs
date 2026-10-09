@@ -218,7 +218,9 @@ pub async fn download(
         Ok(received) => {
             if let Err(e) = tokio::fs::rename(&part, local).await {
                 let _ = tokio::fs::remove_file(&part).await;
-                return Err(e.into());
+                let err = Error::Io(e);
+                emit_err(&progress, TransferKind::Download, &name, &err);
+                return Err(err);
             }
             TransferEvent::emit(
                 &progress,
@@ -232,6 +234,9 @@ pub async fn download(
         }
         Err(e) => {
             let _ = tokio::fs::remove_file(&part).await;
+            // 本地落盘失败（磁盘满/权限）也要发 Error 事件复位进度条
+            // （2026-10-09 事后审计 #21；与 FTP 下载 #11 同类）。
+            emit_err(&progress, TransferKind::Download, &name, &e);
             Err(e)
         }
     }

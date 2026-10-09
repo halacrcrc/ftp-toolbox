@@ -314,3 +314,45 @@ async fn server_error_paths_rrq_missing_and_wrq_oversized() {
     server.stop().await;
     let _ = tokio::fs::remove_dir_all(&root).await;
 }
+
+/// 本地落盘失败必须发 Error 事件（2026-10-09 事后审计 #21）：目标父目录不存在
+/// 时 `File::create` 失败，客户端要在返回 Err 前补发 `TransferEvent::Error`，
+/// 否则前端进度条停在 Started 永不复位（与 FTP 下载 #11 同类）。
+#[tokio::test]
+async fn download_local_write_failure_emits_error_event() {
+    let root = unique_path("root");
+    tokio::fs::create_dir_all(&root).await.unwrap();
+
+    let server = tftp::start_server(root.clone(), "127.0.0.1:0".into())
+        .await
+        .unwrap();
+    let addr = server.addr.clone();
+
+    let data: Vec<u8> = (0..4096u32).map(|i| (i % 97) as u8).collect();
+    tokio::fs::write(root.join("serve.bin"), &data)
+        .await
+        .unwrap();
+
+    // 父目录不存在 → 写 `<...>.part` 必失败。
+    let local_down = unique_path("missing-dir").join("out.bin");
+    let (tx, mut rx) = collector();
+    let err = tftp::get(&addr, "serve.bin", &local_down, Some(tx), None)
+        .await
+        .unwrap_err();
+    assert!(
+        matches!(err, ftp_core::Error::Io(_)),
+        "期望 Io 错误，得到 {err:?}"
+    );
+
+    let mut saw_error = false;
+    while let Ok(ev) = rx.try_recv() {
+        if matches!(ev, ftp_core::TransferEvent::Error { .. }) {
+            saw_error = true;
+        }
+    }
+    assert!(saw_error, "本地落盘失败必须发 Error 事件以复位进度条");
+    assert!(!local_down.exists(), "失败的下载不得产出目标文件");
+
+    server.stop().await;
+    let _ = tokio::fs::remove_dir_all(&root).await;
+}

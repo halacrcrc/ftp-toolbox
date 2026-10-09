@@ -497,7 +497,18 @@ impl SftpClient {
             Ok(bytes) => {
                 if let Err(e) = tokio::fs::rename(&part, local).await {
                     let _ = tokio::fs::remove_file(&part).await;
-                    return Err(Error::Io(e));
+                    let err = Error::Io(e);
+                    // rename 失败同样要发 Error 事件，否则前端进度条卡死
+                    // （2026-10-09 事后审计 #20；与 FTP 下载 rename 路径对齐）。
+                    TransferEvent::emit(
+                        &progress,
+                        TransferEvent::Error {
+                            kind: TransferKind::SftpDownload,
+                            file: remote.to_string(),
+                            message: error_chain(&err),
+                        },
+                    );
+                    return Err(err);
                 }
                 TransferEvent::emit(
                     &progress,

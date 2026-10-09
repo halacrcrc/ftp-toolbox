@@ -417,3 +417,50 @@ async fn sftp_cancelled_transfers_report_cancelled_and_keep_session_usable() {
     client.disconnect().await.unwrap();
     handle.stop().await;
 }
+
+/// 下载 rename 失败必须发 Error 事件（2026-10-09 事后审计 #20）：目标路径是一个
+/// 已存在的目录时 `rename(.part → 目标)` 失败，客户端要在返回 Err 前补发
+/// `TransferEvent::Error`，否则前端进度条卡死（与 FTP 下载 rename 路径同类）。
+#[tokio::test]
+async fn sftp_download_rename_failure_emits_error_event() {
+    let (handle, app_data, root, _shutdown) = start_server("rename-fail", false).await;
+    let seed = b"sftp rename seed\n".to_vec();
+    std::fs::write(root.join("seed.txt"), &seed).unwrap();
+    let cfg = client_cfg(handle.port);
+
+    let client = SftpClient::connect(cfg, &app_data, true).await.unwrap();
+
+    // 目标指向一个已存在的目录：`.part` 能写成功，`rename` 必然失败。
+    let dst_dir = temp_dir("rename-fail-dst");
+    let dst = dst_dir.join("occupied");
+    std::fs::create_dir(&dst).unwrap();
+
+    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+    let err = client
+        .download_file("/seed.txt", &dst, Some(tx), None)
+        .await
+        .unwrap_err();
+    assert!(
+        matches!(err, ftp_core::Error::Io(_)),
+        "期望 Io 错误，得到 {err:?}"
+    );
+
+    let mut saw_error = false;
+    while let Ok(ev) = rx.try_recv() {
+        if matches!(ev, ftp_core::TransferEvent::Error { .. }) {
+            saw_error = true;
+        }
+    }
+    assert!(saw_error, "rename 失败必须发 Error 事件以复位进度条");
+
+    // 引擎的 .part 命名是 os_str.push(".part")，不是 with_extension。
+    let mut part_os = dst.as_os_str().to_os_string();
+    part_os.push(".part");
+    assert!(
+        !std::path::PathBuf::from(part_os).exists(),
+        "不得留下 .part"
+    );
+
+    client.disconnect().await.unwrap();
+    handle.stop().await;
+}

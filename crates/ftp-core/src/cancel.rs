@@ -44,11 +44,82 @@ pub async fn chunk<T>(
     token: Option<&CancellationToken>,
     fut: impl Future<Output = T>,
 ) -> Result<T> {
+    chunk_bounded(token, IDLE_TIMEOUT, fut).await
+}
+
+/// [`chunk`] with an injectable timeout, so tests don't have to wait 30 s.
+async fn chunk_bounded<T>(
+    token: Option<&CancellationToken>,
+    limit: Duration,
+    fut: impl Future<Output = T>,
+) -> Result<T> {
     tokio::select! {
         _ = cancelled(token) => Err(Error::Cancelled),
-        r = tokio::time::timeout(IDLE_TIMEOUT, fut) => match r {
+        r = tokio::time::timeout(limit, fut) => match r {
             Ok(v) => Ok(v),
             Err(_elapsed) => Err(Error::Timeout),
         },
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// 关键不变量（review 2026-10-08 测试缺口 #6）：token=None 时 chunk 必须
+    /// 等价于裸 await —— 正常完成的 future 原样返回，不引入任何额外错误。
+    #[tokio::test]
+    async fn chunk_without_token_behaves_like_plain_await() {
+        let v = chunk(None, async { 7 }).await.unwrap();
+        assert_eq!(v, 7);
+        let e = chunk(None, async { Err::<(), _>(Error::Timeout) })
+            .await
+            .unwrap();
+        assert!(matches!(e, Err(Error::Timeout)), "内层错误必须原样穿透");
+    }
+
+    #[tokio::test]
+    async fn chunk_times_out_slow_future() {
+        let started = tokio::time::Instant::now();
+        let err = chunk_bounded(None, Duration::from_millis(20), async {
+            tokio::time::sleep(Duration::from_secs(60)).await;
+            1
+        })
+        .await
+        .unwrap_err();
+        assert!(matches!(err, Error::Timeout), "{err:?}");
+        assert!(started.elapsed() < Duration::from_secs(5), "必须按时返回，而不是等 future 结束");
+    }
+
+    #[tokio::test]
+    async fn chunk_aborts_on_cancelled_token() {
+        let token = CancellationToken::new();
+        token.cancel();
+        let err = chunk_bounded(Some(&token), Duration::from_secs(60), async { 1 })
+            .await
+            .unwrap_err();
+        assert!(matches!(err, Error::Cancelled), "{err:?}");
+    }
+
+    #[tokio::test]
+    async fn cancelled_resolves_once_token_fires() {
+        let token = CancellationToken::new();
+        // 未取消时 pending（用短超时证明它没有立即完成）
+        let pending = tokio::time::timeout(Duration::from_millis(10), cancelled(Some(&token))).await;
+        assert!(pending.is_err(), "未取消时 cancelled 不得完成");
+        // 取消后立即完成
+        token.cancel();
+        tokio::time::timeout(Duration::from_millis(100), cancelled(Some(&token)))
+            .await
+            .expect("取消后必须立即完成");
+    }
+
+    #[test]
+    fn check_maps_states() {
+        assert!(check(None).is_ok());
+        let token = CancellationToken::new();
+        assert!(check(Some(&token)).is_ok());
+        token.cancel();
+        assert!(matches!(check(Some(&token)), Err(Error::Cancelled)));
     }
 }

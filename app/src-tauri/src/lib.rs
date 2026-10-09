@@ -39,17 +39,25 @@ struct AppState {
     /// TOFU 信任状态在磁盘 known_hosts，不在这里).
     sftp_client: AsyncMutex<Option<SftpClient>>,
     /// In-flight transfer cancellation tokens, keyed by the frontend-generated
-    /// transfer id. std mutex: register/cancel never await. Entries are
-    /// removed when the transfer command finishes (成功或失败都会摘除).
+    /// transfer id. std mutex: register/cancel never await —— **约束：任何持有
+    /// 该锁的代码不得跨 .await**（MutexGuard 非 Send，目前靠编译器兜底）。
+    /// Entries are removed when the transfer command finishes (成功或失败都会摘除).
     cancels: Mutex<HashMap<String, ftp_core::CancellationToken>>,
 }
 
 /// Register a fresh cancellation token for `transfer_id`; the command removes
-/// it when the transfer settles (see [`unregister_cancel`]).
+/// it when the transfer settles (see [`unregister_cancel`]). Call it *after*
+/// acquiring the session lock so a queued transfer never shows a cancel
+/// button for a transfer that has not started (review 2026-10-08 #4).
 fn register_cancel(state: &AppState, transfer_id: &str) -> ftp_core::CancellationToken {
     let token = ftp_core::CancellationToken::new();
     if let Ok(mut m) = state.cancels.lock() {
-        m.insert(transfer_id.to_string(), token.clone());
+        if let Some(old) = m.insert(transfer_id.to_string(), token.clone()) {
+            // 前端 id 用 UUID，碰撞几乎不可能；一旦发生说明契约被破坏，
+            // 让旧传输至少保持可取消，并留下日志线索。
+            tracing::warn!(transfer_id, "transferId 重复注册，旧令牌已被取代");
+            old.cancel();
+        }
     }
     token
 }
@@ -682,10 +690,12 @@ async fn ftp_upload(
     transfer_id: Option<String>,
 ) -> CmdResult<String> {
     let tx = progress_forwarder(&app);
-    let token = transfer_id.as_deref().map(|id| register_cancel(&state, id));
     let result = async {
         let mut guard = state.ftp_client.lock().await;
         let client = guard.as_mut().ok_or("未连接 FTP 服务器")?;
+        // 拿到会话锁之后才注册令牌：否则排队中的传输也会亮起取消按钮，
+        // 用户以为在取消正在跑的传输，实际取消的是还没开始的这个。
+        let token = transfer_id.as_deref().map(|id| register_cancel(&state, id));
         client
             .upload(std::path::Path::new(&local), &remote, Some(tx), token)
             .await
@@ -708,10 +718,10 @@ async fn ftp_download(
     transfer_id: Option<String>,
 ) -> CmdResult<String> {
     let tx = progress_forwarder(&app);
-    let token = transfer_id.as_deref().map(|id| register_cancel(&state, id));
     let result = async {
         let mut guard = state.ftp_client.lock().await;
         let client = guard.as_mut().ok_or("未连接 FTP 服务器")?;
+        let token = transfer_id.as_deref().map(|id| register_cancel(&state, id));
         client
             .download(&remote, std::path::Path::new(&local), Some(tx), token)
             .await
@@ -1097,10 +1107,10 @@ async fn sftp_client_upload(
     transfer_id: Option<String>,
 ) -> CmdResult<String> {
     let tx = progress_forwarder(&app);
-    let token = transfer_id.as_deref().map(|id| register_cancel(&state, id));
     let result = async {
         let guard = state.sftp_client.lock().await;
         let client = guard.as_ref().ok_or("未连接 SFTP 服务器")?;
+        let token = transfer_id.as_deref().map(|id| register_cancel(&state, id));
         client
             .upload_file(std::path::Path::new(&local_path), &remote_path, Some(tx), token)
             .await
@@ -1123,10 +1133,10 @@ async fn sftp_client_download(
     transfer_id: Option<String>,
 ) -> CmdResult<String> {
     let tx = progress_forwarder(&app);
-    let token = transfer_id.as_deref().map(|id| register_cancel(&state, id));
     let result = async {
         let guard = state.sftp_client.lock().await;
         let client = guard.as_ref().ok_or("未连接 SFTP 服务器")?;
+        let token = transfer_id.as_deref().map(|id| register_cancel(&state, id));
         client
             .download_file(&remote_path, std::path::Path::new(&local_path), Some(tx), token)
             .await

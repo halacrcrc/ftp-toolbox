@@ -3,7 +3,6 @@
 //! lifecycles (server handles, the connected FTP client) and forward
 //! progress events to the frontend.
 
-use std::collections::HashMap;
 use std::net::IpAddr;
 use std::ops::Range;
 use std::path::PathBuf;
@@ -39,33 +38,9 @@ struct AppState {
     /// TOFU 信任状态在磁盘 known_hosts，不在这里).
     sftp_client: AsyncMutex<Option<SftpClient>>,
     /// In-flight transfer cancellation tokens, keyed by the frontend-generated
-    /// transfer id. std mutex: register/cancel never await —— **约束：任何持有
-    /// 该锁的代码不得跨 .await**（MutexGuard 非 Send，目前靠编译器兜底）。
-    /// Entries are removed when the transfer command finishes (成功或失败都会摘除).
-    cancels: Mutex<HashMap<String, ftp_core::CancellationToken>>,
-}
-
-/// Register a fresh cancellation token for `transfer_id`; the command removes
-/// it when the transfer settles (see [`unregister_cancel`]). Call it *after*
-/// acquiring the session lock so a queued transfer never shows a cancel
-/// button for a transfer that has not started (review 2026-10-08 #4).
-fn register_cancel(state: &AppState, transfer_id: &str) -> ftp_core::CancellationToken {
-    let token = ftp_core::CancellationToken::new();
-    if let Ok(mut m) = state.cancels.lock() {
-        if let Some(old) = m.insert(transfer_id.to_string(), token.clone()) {
-            // 前端 id 用 UUID，碰撞几乎不可能；一旦发生说明契约被破坏，
-            // 让旧传输至少保持可取消，并留下日志线索。
-            tracing::warn!(transfer_id, "transferId 重复注册，旧令牌已被取代");
-            old.cancel();
-        }
-    }
-    token
-}
-
-fn unregister_cancel(state: &AppState, transfer_id: &str) {
-    if let Ok(mut m) = state.cancels.lock() {
-        m.remove(transfer_id);
-    }
+    /// transfer id. 生命周期规则（拿锁后注册 / 摘除 / 重复 id 处置）都在
+    /// `ftp_core::cancel::CancelRegistry`，可单测；这里的锁从不跨 .await。
+    cancels: ftp_core::cancel::CancelRegistry,
 }
 
 type CmdResult<T> = Result<T, String>;
@@ -695,7 +670,7 @@ async fn ftp_upload(
         let client = guard.as_mut().ok_or("未连接 FTP 服务器")?;
         // 拿到会话锁之后才注册令牌：否则排队中的传输也会亮起取消按钮，
         // 用户以为在取消正在跑的传输，实际取消的是还没开始的这个。
-        let token = transfer_id.as_deref().map(|id| register_cancel(&state, id));
+        let token = transfer_id.as_deref().map(|id| state.cancels.register(id));
         client
             .upload(std::path::Path::new(&local), &remote, Some(tx), token)
             .await
@@ -704,7 +679,7 @@ async fn ftp_upload(
     }
     .await;
     if let Some(id) = transfer_id.as_deref() {
-        unregister_cancel(&state, id);
+        state.cancels.unregister(id);
     }
     result
 }
@@ -721,7 +696,7 @@ async fn ftp_download(
     let result = async {
         let mut guard = state.ftp_client.lock().await;
         let client = guard.as_mut().ok_or("未连接 FTP 服务器")?;
-        let token = transfer_id.as_deref().map(|id| register_cancel(&state, id));
+        let token = transfer_id.as_deref().map(|id| state.cancels.register(id));
         client
             .download(&remote, std::path::Path::new(&local), Some(tx), token)
             .await
@@ -730,7 +705,7 @@ async fn ftp_download(
     }
     .await;
     if let Some(id) = transfer_id.as_deref() {
-        unregister_cancel(&state, id);
+        state.cancels.unregister(id);
     }
     result
 }
@@ -747,7 +722,7 @@ async fn tftp_upload(
     transfer_id: Option<String>,
 ) -> CmdResult<String> {
     let tx = progress_forwarder(&app);
-    let token = transfer_id.as_deref().map(|id| register_cancel(&state, id));
+    let token = transfer_id.as_deref().map(|id| state.cancels.register(id));
     let result = ftp_core::tftp::put(
         &server,
         std::path::Path::new(&local),
@@ -759,7 +734,7 @@ async fn tftp_upload(
     .map(|_| format!("上传完成: {remote}"))
     .map_err(err);
     if let Some(id) = transfer_id.as_deref() {
-        unregister_cancel(&state, id);
+        state.cancels.unregister(id);
     }
     result
 }
@@ -774,7 +749,7 @@ async fn tftp_download(
     transfer_id: Option<String>,
 ) -> CmdResult<String> {
     let tx = progress_forwarder(&app);
-    let token = transfer_id.as_deref().map(|id| register_cancel(&state, id));
+    let token = transfer_id.as_deref().map(|id| state.cancels.register(id));
     let result = ftp_core::tftp::get(
         &server,
         &remote,
@@ -786,7 +761,7 @@ async fn tftp_download(
     .map(|_| format!("下载完成: {remote}"))
     .map_err(err);
     if let Some(id) = transfer_id.as_deref() {
-        unregister_cancel(&state, id);
+        state.cancels.unregister(id);
     }
     result
 }
@@ -799,17 +774,10 @@ async fn cancel_transfer(
     state: State<'_, AppState>,
     transfer_id: String,
 ) -> CmdResult<String> {
-    let token = state
-        .cancels
-        .lock()
-        .map_err(err)?
-        .remove(&transfer_id);
-    match token {
-        Some(t) => {
-            t.cancel();
-            Ok("已请求取消传输".into())
-        }
-        None => Err("没有找到该传输（可能已完成或已取消）".into()),
+    if state.cancels.cancel(&transfer_id) {
+        Ok("已请求取消传输".into())
+    } else {
+        Err("没有找到该传输（可能已完成或已取消）".into())
     }
 }
 
@@ -1110,7 +1078,7 @@ async fn sftp_client_upload(
     let result = async {
         let guard = state.sftp_client.lock().await;
         let client = guard.as_ref().ok_or("未连接 SFTP 服务器")?;
-        let token = transfer_id.as_deref().map(|id| register_cancel(&state, id));
+        let token = transfer_id.as_deref().map(|id| state.cancels.register(id));
         client
             .upload_file(std::path::Path::new(&local_path), &remote_path, Some(tx), token)
             .await
@@ -1119,7 +1087,7 @@ async fn sftp_client_upload(
     }
     .await;
     if let Some(id) = transfer_id.as_deref() {
-        unregister_cancel(&state, id);
+        state.cancels.unregister(id);
     }
     result
 }
@@ -1136,7 +1104,7 @@ async fn sftp_client_download(
     let result = async {
         let guard = state.sftp_client.lock().await;
         let client = guard.as_ref().ok_or("未连接 SFTP 服务器")?;
-        let token = transfer_id.as_deref().map(|id| register_cancel(&state, id));
+        let token = transfer_id.as_deref().map(|id| state.cancels.register(id));
         client
             .download_file(&remote_path, std::path::Path::new(&local_path), Some(tx), token)
             .await
@@ -1145,7 +1113,7 @@ async fn sftp_client_download(
     }
     .await;
     if let Some(id) = transfer_id.as_deref() {
-        unregister_cancel(&state, id);
+        state.cancels.unregister(id);
     }
     result
 }

@@ -6,6 +6,7 @@
 //! operation by [`IDLE_TIMEOUT`] so a silently dead peer can no longer wedge
 //! a transfer — and with it the client session mutex — forever.
 
+use std::collections::HashMap;
 use std::future::Future;
 use std::time::Duration;
 
@@ -13,6 +14,71 @@ use crate::error::{Error, Result};
 
 /// Re-exported so shells depend on `ftp_core` alone for the token type.
 pub use tokio_util::sync::CancellationToken;
+
+/// Shell-side registry of in-flight transfer tokens, keyed by the
+/// frontend-generated transfer id. Extracted from the Tauri shell so the
+/// lifecycle rules are unit-testable (review 2026-10-09 测试缺口 #7):
+/// register *after* the transfer actually starts, unregister when it settles
+/// (成功或失败都会摘除), and a duplicate id cancels the displaced token
+/// instead of silently stranding the old transfer.
+#[derive(Default)]
+pub struct CancelRegistry {
+    map: std::sync::Mutex<HashMap<String, CancellationToken>>,
+}
+
+impl CancelRegistry {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Register a fresh token for `id`. The shell calls this *after*
+    /// acquiring the session lock, so a queued transfer never exposes a
+    /// cancel button for a transfer that has not started (2026-10-09 #4).
+    pub fn register(&self, id: &str) -> CancellationToken {
+        let token = CancellationToken::new();
+        if let Ok(mut map) = self.map.lock() {
+            if let Some(old) = map.insert(id.to_string(), token.clone()) {
+                // 前端 id 用 UUID，碰撞几乎不可能；一旦发生说明契约被破坏，
+                // 让旧传输至少保持可取消，并留下日志线索。
+                tracing::warn!(id, "transferId 重复注册，旧令牌已被取代");
+                old.cancel();
+            }
+        }
+        token
+    }
+
+    /// Remove the entry when a transfer settles.
+    pub fn unregister(&self, id: &str) {
+        if let Ok(mut map) = self.map.lock() {
+            map.remove(id);
+        }
+    }
+
+    /// Cancel and remove the token for `id`; `false` when the transfer is not
+    /// in flight (already finished, or never registered) — the shell maps
+    /// that to "没有找到该传输".
+    pub fn cancel(&self, id: &str) -> bool {
+        match self.map.lock() {
+            Ok(mut map) => match map.remove(id) {
+                Some(token) => {
+                    token.cancel();
+                    true
+                }
+                None => false,
+            },
+            Err(_) => false,
+        }
+    }
+
+    /// Number of in-flight transfers (test/diagnostics helper).
+    pub fn len(&self) -> usize {
+        self.map.lock().map(|m| m.len()).unwrap_or(0)
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.len() == 0
+    }
+}
 
 /// How long a single chunk read/write may stall before the transfer is
 /// declared dead. Generous on purpose: a busy NIC or a slow disk can pause a
@@ -95,7 +161,9 @@ mod tests {
     async fn chunk_aborts_on_cancelled_token() {
         let token = CancellationToken::new();
         token.cancel();
-        let err = chunk_bounded(Some(&token), Duration::from_secs(60), async { 1 })
+        // 用永不完成的 future：select 两个分支同时就绪时随机胜出（立即完成的
+        // future 可能抢先返回 Ok），只有 pending 才能让取消成为唯一出路。
+        let err = chunk_bounded(Some(&token), Duration::from_secs(60), std::future::pending::<()>())
             .await
             .unwrap_err();
         assert!(matches!(err, Error::Cancelled), "{err:?}");
@@ -121,5 +189,42 @@ mod tests {
         assert!(check(Some(&token)).is_ok());
         token.cancel();
         assert!(matches!(check(Some(&token)), Err(Error::Cancelled)));
+    }
+
+    /// 注册表生命周期（review 2026-10-09 测试缺口 #7）：注册 → 取消摘除 →
+    /// 重复注册取消旧令牌 → unregister 后 cancel 落空。
+    #[test]
+    fn registry_lifecycle() {
+        let reg = CancelRegistry::new();
+        assert!(reg.is_empty());
+
+        let token = reg.register("t1");
+        assert_eq!(reg.len(), 1);
+
+        // cancel 命中并摘除
+        assert!(reg.cancel("t1"));
+        assert!(token.is_cancelled());
+        assert!(reg.is_empty());
+
+        // 已摘除后再 cancel 落空（壳层映射为「没有找到该传输」）
+        assert!(!reg.cancel("t1"));
+
+        // unregister 摘除
+        let _ = reg.register("t2");
+        reg.unregister("t2");
+        assert!(reg.is_empty());
+        assert!(!reg.cancel("t2"));
+    }
+
+    #[test]
+    fn registry_duplicate_id_cancels_displaced_token() {
+        let reg = CancelRegistry::new();
+        let old = reg.register("dup");
+        let new = reg.register("dup");
+        assert!(old.is_cancelled(), "被顶掉的旧令牌必须保持可取消语义");
+        assert!(!new.is_cancelled());
+        assert_eq!(reg.len(), 1);
+        assert!(reg.cancel("dup"));
+        assert!(new.is_cancelled());
     }
 }

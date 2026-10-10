@@ -214,6 +214,8 @@ export const api = {
     invoke<string>("ftp_upload", { local, remote, transferId: transferId ?? null }),
   ftpDownload: (remote: string, local: string, transferId?: string) =>
     invoke<string>("ftp_download", { remote, local, transferId: transferId ?? null }),
+  /** 递归创建本地目录（批量下载时按远端结构建子目录）。 */
+  createLocalDir: (path: string) => invoke<string>("create_local_dir", { path }),
 
   tftpUpload: (server: string, local: string, remote: string, transferId?: string) =>
     invoke<string>("tftp_upload", { server, local, remote, transferId: transferId ?? null }),
@@ -316,6 +318,15 @@ export function pathDir(p: string): string {
 export function pathBase(p: string): string {
   const i = Math.max(p.lastIndexOf("\\"), p.lastIndexOf("/"));
   return i >= 0 ? p.slice(i + 1) : p;
+}
+
+/**
+ * 远端条目名的本地落盘净化：把路径分隔符换成下划线。远端文件名是服务器
+ * 说了算（Windows 明令禁止的 `\` `/` 也可能出现在异构服务器的列表里），
+ * 拼接本地路径前不处理，恶意/异常服务器就能借文件名逃出用户选的目标目录。
+ */
+export function pathSafeName(name: string): string {
+  return name.replace(/[\\/]/g, "_");
 }
 
 export function onTransferProgress(cb: (ev: TransferEvent) => void) {

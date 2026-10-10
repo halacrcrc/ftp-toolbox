@@ -90,6 +90,15 @@ fn progress_forwarder(app: &AppHandle) -> ProgressTx {
     tx
 }
 
+/// 批量下载用：递归创建本地目录，对应远端的目录结构。
+/// 路径来自用户选定的目标目录 + 远端条目名；前端已把文件名里的路径
+/// 分隔符替换成下划线（pathSafeName），这里不再重复校验。
+#[tauri::command]
+async fn create_local_dir(path: String) -> CmdResult<String> {
+    tokio::fs::create_dir_all(&path).await.map_err(err)?;
+    Ok(format!("已创建目录 {path}"))
+}
+
 // ---------- FTP server ----------
 
 /// Where the FTPS certificate pair lives: `<app-data>/certs/{cert,key}.pem`.
@@ -1445,6 +1454,7 @@ pub fn run() {
             ftp_disconnect,
             ftp_list,
             ftp_list_detailed,
+            create_local_dir,
             ftp_upload,
             ftp_download,
             tftp_upload,

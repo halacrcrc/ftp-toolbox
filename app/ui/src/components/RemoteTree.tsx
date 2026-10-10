@@ -32,9 +32,9 @@ interface RemoteTreeProps {
   /** 可选：点「上传」按钮打开系统文件选择器（父组件接手后续上传流程）。 */
   onUpload?(): void;
   /**
-   * 批量下载勾选的文件。文件行的点按 = 勾选/取消勾选，下载统一走头部
-   * 「下载（N）」按钮（N 为勾选数）；只允许勾文件——目录的批量下载要
-   * 递归拉取，另立需求。
+   * 批量下载勾选的条目。文件行/文件夹行的点按 = 勾选/取消勾选（目录行的
+   * 点按仍然是下钻，勾选走勾选框），下载统一走头部「下载（N）」按钮；
+   * 文件夹由父组件递归拉取，链接/特殊条目不参与（语义随服务器而异，可能成环）。
    */
   onDownloadMany(entries: RemoteEntry[]): void;
 }
@@ -85,10 +85,10 @@ export default function RemoteTree({
   const [selected, setSelected] = useState<Set<string>>(new Set());
   useEffect(() => setSelected(new Set()), [currentPath]);
 
-  const files = (entries ?? []).filter((e) => e.kind === "file");
-  const allPicked = files.length > 0 && files.every((e) => selected.has(e.name));
+  const checkable = (entries ?? []).filter((e) => e.kind === "file" || e.kind === "dir");
+  const allPicked = checkable.length > 0 && checkable.every((e) => selected.has(e.name));
   const pickAll = () =>
-    setSelected(allPicked ? new Set() : new Set(files.map((e) => e.name)));
+    setSelected(allPicked ? new Set() : new Set(checkable.map((e) => e.name)));
   const toggleOne = (name: string) =>
     setSelected((prev) => {
       const next = new Set(prev);
@@ -97,8 +97,8 @@ export default function RemoteTree({
       return next;
     });
   const confirmDownload = () => {
-    // 下发前按当前列表过滤一遍：勾选后文件可能已被刷新掉。
-    const picked = files.filter((e) => selected.has(e.name));
+    // 下发前按当前列表过滤一遍：勾选后条目可能已被刷新掉。
+    const picked = checkable.filter((e) => selected.has(e.name));
     setSelected(new Set());
     onDownloadMany(picked);
   };
@@ -149,7 +149,7 @@ export default function RemoteTree({
               上传
             </button>
           )}
-          {files.length > 0 && (
+          {checkable.length > 0 && (
             <button
               type="button"
               className="btn small"
@@ -172,7 +172,7 @@ export default function RemoteTree({
       <div className="remote-tree-body">
         {!disabled && (
           <div className="remote-tree-hint">
-            点「上传」选择文件、或把文件拖到此区域即可上传到当前目录；点文件行勾选，「下载（N）」批量下载。
+            点「上传」选择文件、或把文件拖到此区域即可上传到当前目录；点行勾选（文件夹也可勾），「下载（N）」批量下载。
           </div>
         )}
         {loading ? (
@@ -202,12 +202,12 @@ export default function RemoteTree({
               }}
               title={e.name}
             >
-              {e.kind === "file" && (
+              {(e.kind === "file" || e.kind === "dir") && (
                 <input
                   type="checkbox"
                   className="remote-tree-check"
                   checked={selected.has(e.name)}
-                  // 拦掉冒泡：行本身点按也是切换勾选，不能让复选框的点击触发两次。
+                  // 拦掉冒泡：行本身点按也是切换勾选（目录行是下钻），不能让复选框的点击再触发一次。
                   onClick={(ev) => ev.stopPropagation()}
                   onKeyDown={(ev) => ev.stopPropagation()}
                   onChange={() => toggleOne(e.name)}

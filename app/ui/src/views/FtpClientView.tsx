@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from "react";
-import { api, newTransferId, pathBase, pickOpenDirectory, pickOpenFiles, FtpEntry, ServerStatus } from "../api";
+import { api, newTransferId, pathBase, pathSafeName, pickOpenDirectory, pickOpenFiles, FtpEntry, ServerStatus } from "../api";
 import { getCurrentWebview } from "@tauri-apps/api/webview";
 import RemoteTree, { RemoteEntry } from "../components/RemoteTree";
 import { joinDefault } from "./FtpPage";
@@ -173,8 +173,9 @@ export default function FtpClientView({
   };
 
   /**
-   * 批量下载（树里勾选多个文件）：先选一次目标目录，勾选的文件依次下到该
-   * 目录（保留原文件名），失败不中断后续文件。
+   * 批量下载（树里勾选文件/文件夹）：先选一次目标目录。文件直接下到该目录；
+   * 文件夹先建本地目录再递归拉取，保持目录结构。串行执行（单连接模型，勿
+   * 并发），单个失败不中断，结尾汇总成功/失败数。
    */
   const downloadMany = async (picked: RemoteEntry[]) => {
     if (picked.length === 0) return;
@@ -186,24 +187,50 @@ export default function FtpClientView({
       return;
     }
     if (!dir) return;
-    for (const e of picked) {
+    let okFiles = 0;
+    let failed = 0;
+    const runFile = async (remotePath: string, localPath: string) => {
       const transferId = newTransferId();
       onTransferChange?.(transferId);
       try {
-        log(
-          await api.ftpDownload(
-            joinRemote(currentPath, e.name),
-            joinDefault(dir, e.name),
-            transferId
-          ),
-          "ok"
-        );
+        log(await api.ftpDownload(remotePath, localPath, transferId), "ok");
+        okFiles++;
       } catch (err) {
-        log(`下载失败: ${e.name}: ${err}`, "error");
+        failed++;
+        log(`下载失败: ${remotePath}: ${err}`, "error");
       } finally {
         onTransferChange?.(null);
       }
-    }
+    };
+    const walk = async (entries: RemoteEntry[], remoteDir: string, localDir: string) => {
+      for (const e of entries) {
+        if (e.kind === "file") {
+          await runFile(joinRemote(remoteDir, e.name), joinDefault(localDir, pathSafeName(e.name)));
+        } else if (e.kind === "dir") {
+          const sub = joinDefault(localDir, pathSafeName(e.name));
+          try {
+            await api.createLocalDir(sub);
+          } catch (err) {
+            failed++;
+            log(`创建目录失败: ${sub}: ${err}`, "error");
+            continue;
+          }
+          try {
+            const kids = await api.ftpListDetailed(joinRemote(remoteDir, e.name));
+            await walk(kids.map(toRemoteEntry), joinRemote(remoteDir, e.name), sub);
+          } catch (err) {
+            failed++;
+            log(`列目录失败: ${joinRemote(remoteDir, e.name)}: ${err}`, "error");
+          }
+        } else {
+          // 链接/特殊条目不下载不递归：链接语义随服务器而异，还可能成环。
+          log(`跳过 ${e.name}（${e.kind === "symlink" ? "链接" : "类型未知"}）`);
+        }
+      }
+    };
+    await walk(picked, currentPath, dir);
+    if (failed > 0) log(`批量下载结束：${okFiles} 个成功，${failed} 个失败`, "error");
+    else log(`批量下载结束：共 ${okFiles} 个文件`, "ok");
   };
 
   // Tauri v2 拦截了 HTML5 drop 事件（dragDropEnabled 默认开），拖拽上传只能走

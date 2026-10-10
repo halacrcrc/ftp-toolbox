@@ -11,9 +11,12 @@ type TransferChange = (id: string | null) => void;
 export default function FtpClientView({
   log,
   onTransferChange,
+  defaultLocal,
 }: {
   log: Log;
   onTransferChange?: TransferChange;
+  /** 本地默认文件路径（文档目录下），由页面传入。 */
+  defaultLocal: string;
 }) {
   const [addr, setAddr] = useState("127.0.0.1:2121");
   const [user, setUser] = useState("anonymous");
@@ -22,7 +25,7 @@ export default function FtpClientView({
   const [busy, setBusy] = useState(false);
   const [remotePath, setRemotePath] = useState("");
   const [listing, setListing] = useState<string[] | null>(null);
-  const [local, setLocal] = useState("C:\\ftp-root\\hello.txt");
+  const [local, setLocal] = useState(defaultLocal);
   const [remote, setRemote] = useState("hello.txt");
   // FTPS（显式 TLS）：连上后先 AUTH TLS 再发账号密码，凭据不走明文。
   // 自签服务器（包括本应用自己）需要勾「接受无效证书」。

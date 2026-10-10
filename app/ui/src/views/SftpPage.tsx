@@ -1,9 +1,10 @@
 import { useCallback } from "react";
 import { api, SftpServerStatus } from "../api";
-import ServerCard, { DEFAULT_SFTP_ROOT } from "../components/ServerCard";
+import ServerCard from "../components/ServerCard";
 import useInterfaces from "../hooks/useInterfaces";
 import { LogEntry } from "../App";
 import SftpClientView from "./SftpClientView";
+import { joinDefault } from "./FtpPage";
 
 type Log = (text: string, level?: LogEntry["level"]) => void;
 
@@ -15,10 +16,12 @@ interface Props {
   sftpStatus: SftpServerStatus | null;
   refresh: () => Promise<void>;
   onTransferChange: TransferChange;
+  /** 默认目录的基路径（系统文档目录），见 App.tsx。 */
+  defaultBase: string;
 }
 
 /** SFTP 页 = 左侧服务器卡 + 右侧客户端卡（窄窗口时 auto-fit 折成单列，服务器在上）。 */
-export default function SftpPage({ log, sftpStatus, refresh, onTransferChange }: Props) {
+export default function SftpPage({ log, sftpStatus, refresh, onTransferChange, defaultBase }: Props) {
   const { interfaces, interfacesLoaded, reload } = useInterfaces(log);
   // 刷新按钮同时更新运行态和网卡列表（网卡 IP 会随网络环境变化）
   const refreshAll = useCallback(async () => {
@@ -31,7 +34,7 @@ export default function SftpPage({ log, sftpStatus, refresh, onTransferChange }:
         serverKey="sftp"
         title="SFTP 服务器"
         desc="SSH 文件传输；密码或公钥任一通过即可登录"
-        defaultRoot={DEFAULT_SFTP_ROOT}
+        defaultRoot={joinDefault(defaultBase, "sftp-root")}
         defaultPort="2222"
         portHint="默认 2222"
         withSftp
@@ -65,7 +68,11 @@ export default function SftpPage({ log, sftpStatus, refresh, onTransferChange }:
         onRefresh={refreshAll}
         log={log}
       />
-      <SftpClientView log={log} onTransferChange={onTransferChange} />
+      <SftpClientView
+        log={log}
+        onTransferChange={onTransferChange}
+        defaultLocal={joinDefault(defaultBase, "sftp-root", "hello.txt")}
+      />
     </div>
   );
 }

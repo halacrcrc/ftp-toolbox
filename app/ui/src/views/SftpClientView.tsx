@@ -34,9 +34,12 @@ function formatEntry(e: SftpEntry): string {
 export default function SftpClientView({
   log,
   onTransferChange,
+  defaultLocal,
 }: {
   log: Log;
   onTransferChange?: TransferChange;
+  /** 本地默认文件路径（文档目录下），由页面传入。 */
+  defaultLocal: string;
 }) {
   // 连接远端用标准 SSH 端口 22（本应用自己的服务器默认 2222，输入框可改）
   const [host, setHost] = useState("127.0.0.1");
@@ -47,7 +50,7 @@ export default function SftpClientView({
   const [busy, setBusy] = useState(false);
   const [remotePath, setRemotePath] = useState("");
   const [listing, setListing] = useState<SftpEntry[] | null>(null);
-  const [local, setLocal] = useState("C:\\sftp-root\\hello.txt");
+  const [local, setLocal] = useState(defaultLocal);
   const [remote, setRemote] = useState("hello.txt");
   const [prompt, setPrompt] = useState<HostKeyPrompt | null>(null);
   // 「清除已信任主机」两步确认：第一次点击进入确认态，再点才真正执行

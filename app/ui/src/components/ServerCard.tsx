@@ -13,13 +13,6 @@ import { LogEntry } from "../App";
 
 type Log = (text: string, level?: LogEntry["level"]) => void;
 
-// Windows 优先的默认共享目录；其他平台没有 C 盘概念，留空让用户自填或用
-// 「浏览…」选择（后端启动前会校验目录存在性，空值会得到明确报错而非神秘失败）。
-const IS_WINDOWS = navigator.userAgent.includes("Windows");
-export const DEFAULT_FTP_ROOT = IS_WINDOWS ? "C:\\ftp-root" : "";
-export const DEFAULT_TFTP_ROOT = IS_WINDOWS ? "C:\\tftp-root" : "";
-export const DEFAULT_SFTP_ROOT = IS_WINDOWS ? "C:\\sftp-root" : "";
-
 // ---------- persisted per-server preferences ----------
 
 interface ServerPrefs {
@@ -53,8 +46,9 @@ function loadPrefs(key: string, fallback: ServerPrefs): ServerPrefs {
 /**
  * 解析界面里填的被动端口段，返回闭区间 [start, end]。
  *
- * 只做形状检查；真正的合法性（起止顺序、是否低于 1024）由后端在启动时判定，
- * 免得两边各写一套规则慢慢跑偏。
+ * 只做形状检查；与后端启动校验的口径对齐由 {@link passiveIssue} 负责 ——
+ * 后端（ftp_core::ftp::passive::parse）仍是最终裁决，前端提前说只是让
+ * 用户在输入时就知道，而不是点了启动才看到一条报错。
  */
 function parsePassive(spec: string): [number, number] | null {
   const text = spec.trim();
@@ -66,6 +60,28 @@ function parsePassive(spec: string): [number, number] | null {
     const port = Number(text);
     return [port, port];
   }
+  return null;
+}
+
+/**
+ * 被动端口段的即时校验：非法时返回给用户看的一句话，合法返回 null。
+ *
+ * 规则与后端 passive::parse/validate 同口径：乱序、超 65535、「-」含头尾
+ * 写法到不了 65535（那要表示 65536，越界）、低于 1024 的特权端口。
+ * 空串不算错 —— 后端对空串取默认段（50000-50099）。
+ */
+function passiveIssue(spec: string): string | null {
+  const text = spec.trim();
+  if (!text) return null;
+  const parsed = parsePassive(text);
+  if (!parsed) return "格式应为 起始-结束（如 50000-50099）、起始..结束，或单个端口";
+  const [start, end] = parsed;
+  if (start > end) return `起始端口 ${start} 不能大于结束端口 ${end}`;
+  if (end === 65535 && !text.includes("..")) {
+    return "「-」写法含头尾，结束端口到不了 65535，请改用 65534 或「起始..结束」写法";
+  }
+  if (start > 65535 || end > 65535) return "端口不能超过 65535";
+  if (start < 1024) return "被动端口不能低于 1024（特权端口段）";
   return null;
 }
 
@@ -281,8 +297,15 @@ export default function ServerCard({
   // partial overlap means PASV fails roughly 1% of the time — invisible until
   // a colleague reports "列表偶尔失败". Checking up front turns that into a
   // visible warning with a one-click fix.
+  const passiveIssueText = withPassive ? passiveIssue(prefs.passive) : null;
   useEffect(() => {
     if (!withPassive) return;
+    // 端口段本身非法时不去做系统保留段比对（后端 u16 参数也接不住越界值），
+    // 让位给 passiveIssueText 的格式报错。
+    if (passiveIssueText) {
+      setCheck(null);
+      return;
+    }
     const parsed = parsePassive(prefs.passive);
     if (!parsed) {
       setCheck(null);
@@ -304,7 +327,7 @@ export default function ServerCard({
       cancelled = true;
       clearTimeout(timer);
     };
-  }, [withPassive, prefs.passive]);
+  }, [withPassive, prefs.passive, passiveIssueText]);
 
   // A saved interface IP can disappear (DHCP change, cable unplugged, adapter
   // disabled). Two things this must *not* do:
@@ -531,6 +554,9 @@ export default function ServerCard({
               )}
             </div>
           </label>
+          {passiveIssueText && (
+            <div className="hint-line warn">⚠ {passiveIssueText}</div>
+          )}
           {check && !check.ok && (
             <div className="hint-line warn">
               ⚠ 与系统保留段 {check.conflicts.join("、")} 重叠：落在其中的端口无法用于
@@ -759,11 +785,18 @@ export default function ServerCard({
         ) : (
           // 选中的接口已掉线时不允许启动：否则用户只会拿到一条
           // EADDRNOTAVAIL 绑定失败，而这本来是可以提前避免的。
+          // 被动端口段非法同理：不拦的话用户只会拿到一条启动期报错。
           <button
             className="btn primary"
             onClick={start}
-            disabled={busy || !known || ifaceMissing}
-            title={ifaceMissing ? `监听接口 ${prefs.iface} 已掉线，请先改用其它接口` : undefined}
+            disabled={busy || !known || ifaceMissing || passiveIssueText !== null}
+            title={
+              ifaceMissing
+                ? `监听接口 ${prefs.iface} 已掉线，请先改用其它接口`
+                : passiveIssueText
+                  ? `被动端口段有误：${passiveIssueText}`
+                  : undefined
+            }
           >
             启动服务
           </button>

@@ -1,9 +1,10 @@
 import { useCallback } from "react";
 import { api, ServerStatus } from "../api";
-import ServerCard, { DEFAULT_TFTP_ROOT } from "../components/ServerCard";
+import ServerCard from "../components/ServerCard";
 import useInterfaces from "../hooks/useInterfaces";
 import { LogEntry } from "../App";
 import TftpClientView from "./TftpClientView";
+import { joinDefault } from "./FtpPage";
 
 type Log = (text: string, level?: LogEntry["level"]) => void;
 
@@ -15,10 +16,12 @@ interface Props {
   tftpStatus: ServerStatus | null;
   refresh: () => Promise<void>;
   onTransferChange: TransferChange;
+  /** 默认目录的基路径（系统文档目录），见 App.tsx。 */
+  defaultBase: string;
 }
 
 /** TFTP 页 = 左侧服务器卡 + 右侧客户端卡（窄窗口时 auto-fit 折成单列，服务器在上）。 */
-export default function TftpPage({ log, tftpStatus, refresh, onTransferChange }: Props) {
+export default function TftpPage({ log, tftpStatus, refresh, onTransferChange, defaultBase }: Props) {
   const { interfaces, interfacesLoaded, reload } = useInterfaces(log);
   // 刷新按钮同时更新运行态和网卡列表（网卡 IP 会随网络环境变化）
   const refreshAll = useCallback(async () => {
@@ -31,7 +34,7 @@ export default function TftpPage({ log, tftpStatus, refresh, onTransferChange }:
         serverKey="tftp"
         title="TFTP 服务器"
         desc="支持 blksize 协商（单传可达 500+ MB）"
-        defaultRoot={DEFAULT_TFTP_ROOT}
+        defaultRoot={joinDefault(defaultBase, "tftp-root")}
         defaultPort="69"
         portHint="默认 69"
         interfaces={interfaces}
@@ -42,7 +45,11 @@ export default function TftpPage({ log, tftpStatus, refresh, onTransferChange }:
         onRefresh={refreshAll}
         log={log}
       />
-      <TftpClientView log={log} onTransferChange={onTransferChange} />
+      <TftpClientView
+        log={log}
+        onTransferChange={onTransferChange}
+        defaultLocal={joinDefault(defaultBase, "tftp-root", "hello.txt")}
+      />
     </div>
   );
 }

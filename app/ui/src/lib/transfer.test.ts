@@ -49,14 +49,14 @@ test("sizeSuffix: 大小未知时明说，而不是留个转圈", () => {
   assert.equal(sizeSuffix(8283759), "（7.9 MB）");
 });
 
-test("doneSuffix: 短于 100 ms 的不报时长和平均速度", () => {
-  // 4 KB 文件走回环会算出"0.0s · 平均 51 MB/s"，那是噪声假装成精度。
+test("doneSuffix: 没有 started 样本（elapsed 为 null）时只报大小", () => {
   assert.equal(doneSuffix(1024, null), "1.0 KB");
-  assert.equal(doneSuffix(1024, 0.05), "1.0 KB");
 });
 
-test("doneSuffix: 够长就带上时长与平均速度", () => {
-  assert.equal(doneSuffix(1024, 0.1), "1.0 KB · 0.1s · 平均 10.0 KB/s");
+test("doneSuffix: 总是报时长与平均速度，<1s 用整数毫秒避免 0.0s 假精度", () => {
+  // 4 KB 文件走回环几十毫秒传完是常态，速率是真实测到的，不该被阈值掐掉。
+  assert.equal(doneSuffix(1024, 0.05), "1.0 KB · 50 ms · 平均 20.0 KB/s");
+  assert.equal(doneSuffix(1024, 0.1), "1.0 KB · 100 ms · 平均 10.0 KB/s");
   assert.equal(doneSuffix(2048, 1), "2.0 KB · 1.0s · 平均 2.0 KB/s");
 });
 

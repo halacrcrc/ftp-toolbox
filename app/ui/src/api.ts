@@ -9,6 +9,7 @@
  */
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
+import { documentDir } from "@tauri-apps/api/path";
 import { open, save } from "@tauri-apps/plugin-dialog";
 // 传输相关类型与文案搬到了 `src/lib/transfer.ts`（纯逻辑、可单测），这里只做
 // 转出，方便调用方继续从 api 一处拿齐后端契约。
@@ -245,6 +246,8 @@ export const api = {
     invoke<string>("cancel_transfer", { transferId }),
 
   listInterfaces: () => invoke<NetInterface[]>("list_interfaces"),
+  /** 系统文档目录（Windows 为 %USERPROFILE%\Documents）。默认共享目录的基路径。 */
+  documentsDir: () => documentDir(),
 };
 
 /** Open the native Windows folder picker; null when cancelled. */

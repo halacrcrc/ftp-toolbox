@@ -39,6 +39,10 @@ const TITLES: Record<ViewKey, string> = {
   logs: "运行日志",
 };
 
+// 文档目录解析失败时的兜底基路径（documentDir 在 Windows 上几乎不会失败，
+// 这是极端情况的保底；非 Windows 留空走「让用户自填」流程）。
+const IS_WINDOWS = navigator.userAgent.includes("Windows");
+
 // 单调递增的日志 id：slice(-499) 截断后行内容整体平移，若用数组下标作 key
 // 会导致所有行的 key 错位。id 跟随行本身，重渲染即稳定。
 let nextLogId = 1;
@@ -63,6 +67,25 @@ export default function App() {
   const [ftpStatus, setFtpStatus] = useState<ServerStatus | null>(null);
   const [tftpStatus, setTftpStatus] = useState<ServerStatus | null>(null);
   const [sftpStatus, setSftpStatus] = useState<SftpServerStatus | null>(null);
+  // 默认目录的基路径（系统文档目录）。documentDir 是异步的，而页面只在挂载
+  // 时读一次默认值（useState 初值、localStorage 兜底），所以解析完成前先不
+  // 挂载协议页 —— 常驻挂载下晚挂载没有任何代价。null = 还在解析。
+  const [defaultBase, setDefaultBase] = useState<string | null>(null);
+  useEffect(() => {
+    let cancelled = false;
+    api
+      .documentsDir()
+      .then((dir) => {
+        // 结尾的分隔符去掉，后面统一用 joinDefault 拼子路径
+        if (!cancelled) setDefaultBase(dir.replace(/[\\/]+$/, ""));
+      })
+      .catch(() => {
+        if (!cancelled) setDefaultBase(IS_WINDOWS ? "C:\\Users\\Public" : "");
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, []);
 
   const log = useCallback((text: string, level: LogEntry["level"] = "info") => {
     // keep at most 500 entries so the log view never grows unbounded
@@ -204,32 +227,40 @@ export default function App() {
         <main className="content">
           {/* 协议页常驻挂载，仅切换可见性：客户端连接标志与表单输入都是组件
               内部状态，卸载即丢（后端会话仍在，但 UI 回到「未连接」、TFTP
-              地址还原默认）。日志页数据源在 App，无需常驻。 */}
-          <div hidden={view !== "ftp"}>
-            <FtpPage
-              log={log}
-              ftpStatus={ftpStatus}
-              refresh={refreshFtp}
-              onTransferChange={setActiveTransferId}
-            />
-          </div>
-          <div hidden={view !== "tftp"}>
-            <TftpPage
-              log={log}
-              tftpStatus={tftpStatus}
-              refresh={refreshTftp}
-              onTransferChange={setActiveTransferId}
-            />
-          </div>
-          <div hidden={view !== "sftp"}>
-            <SftpPage
-              log={log}
-              sftpStatus={sftpStatus}
-              refresh={refreshSftp}
-              onTransferChange={setActiveTransferId}
-            />
-          </div>
-          {view === "logs" && <LogView logs={logs} onClear={() => setLogs([])} />}
+              地址还原默认）。日志页数据源在 App，无需常驻。
+              defaultBase 解析完成前整块不渲染（见其注释）。 */}
+          {defaultBase !== null && (
+            <>
+              <div hidden={view !== "ftp"}>
+                <FtpPage
+                  log={log}
+                  ftpStatus={ftpStatus}
+                  refresh={refreshFtp}
+                  onTransferChange={setActiveTransferId}
+                  defaultBase={defaultBase}
+                />
+              </div>
+              <div hidden={view !== "tftp"}>
+                <TftpPage
+                  log={log}
+                  tftpStatus={tftpStatus}
+                  refresh={refreshTftp}
+                  onTransferChange={setActiveTransferId}
+                  defaultBase={defaultBase}
+                />
+              </div>
+              <div hidden={view !== "sftp"}>
+                <SftpPage
+                  log={log}
+                  sftpStatus={sftpStatus}
+                  refresh={refreshSftp}
+                  onTransferChange={setActiveTransferId}
+                  defaultBase={defaultBase}
+                />
+              </div>
+              {view === "logs" && <LogView logs={logs} onClear={() => setLogs([])} />}
+            </>
+          )}
         </main>
         <ProgressBar
           progress={progress}

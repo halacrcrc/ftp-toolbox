@@ -84,13 +84,17 @@ export function sizeSuffix(total: number | null): string {
 /**
  * "7.9 MB · 2.4s · 平均 3.3 MB/s"——done 事件用的后缀。
  *
- * 已用时长与平均速度在 100 ms 以下一律省略：4 KB 文件走回环会算出
- * "0.0s · 平均 51 MB/s"，那是噪声假装成精度。
+ * 只要量得到时长就带上时长与平均速度：回环小文件几十毫秒传完是常态，
+ * 那个速率是真实测到的，掐掉它日志就只剩一个大小（2026-10-10 用户反馈）。
+ * 假精度问题换格式解决而不是靠阈值：< 1s 用整数毫秒，避免旧的
+ * "0.0s · 平均 51 MB/s" 那种一位小数伪装出来的精度。
  */
 export function doneSuffix(bytes: number, elapsed: number | null): string {
   const parts = [fmtBytes(bytes)];
-  if (elapsed !== null && elapsed >= 0.1) {
-    parts.push(`${elapsed.toFixed(1)}s`);
+  if (elapsed !== null && elapsed > 0) {
+    parts.push(
+      elapsed >= 1 ? `${elapsed.toFixed(1)}s` : `${Math.max(1, Math.round(elapsed * 1000))} ms`
+    );
     parts.push(`平均 ${fmtBytes(bytes / elapsed)}/s`);
   }
   return parts.join(" · ");

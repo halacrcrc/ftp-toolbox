@@ -11,12 +11,15 @@ type TransferChange = (id: string | null) => void;
 export default function TftpClientView({
   log,
   onTransferChange,
+  defaultLocal,
 }: {
   log: Log;
   onTransferChange?: TransferChange;
+  /** 本地默认文件路径（文档目录下），由页面传入。 */
+  defaultLocal: string;
 }) {
   const [server, setServer] = useState("127.0.0.1:6969");
-  const [local, setLocal] = useState("C:\\tftp-root\\hello.txt");
+  const [local, setLocal] = useState(defaultLocal);
   const [remote, setRemote] = useState("hello.txt");
 
   const transfer = async (kind: "upload" | "download") => {

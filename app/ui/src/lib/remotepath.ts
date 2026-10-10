@@ -7,7 +7,7 @@
  */
 
 /** 去掉重复 `/` 与 `.`/`..` 段。`..` 越过根时停在根（符合远端 chroot 语义）。 */
-function normalize(p: string): string {
+export function normalize(p: string): string {
   const abs = p.startsWith("/");
   const out: string[] = [];
   for (const seg of p.split("/")) {

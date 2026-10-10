@@ -133,6 +133,17 @@ export interface SftpEntry {
   mtime: number | null;
 }
 
+/** FTP 结构化列目录条目（MLSD facts / LIST 兜底解析，ftp_list_detailed）。 */
+export interface FtpEntry {
+  name: string;
+  /** "file" | "dir" | "symlink" | "other" */
+  kind: string;
+  /** 字节；服务器没说（LIST 兜底切不出）为 null */
+  size: number | null;
+  /** Unix 秒；未知为 null */
+  mtime: number | null;
+}
+
 /** Backend tracing event forwarded over "backend-log". */
 export interface BackendLog {
   level: "TRACE" | "DEBUG" | "INFO" | "WARN" | "ERROR";
@@ -196,6 +207,9 @@ export const api = {
     }),
   ftpDisconnect: () => invoke<string>("ftp_disconnect"),
   ftpList: (path?: string) => invoke<string[]>("ftp_list", { path: path ?? null }),
+  /** 结构化列目录（MLSD 优先，LIST 兜底），远端文件树数据源。 */
+  ftpListDetailed: (path?: string) =>
+    invoke<FtpEntry[]>("ftp_list_detailed", { path: path ?? null }),
   ftpUpload: (local: string, remote: string, transferId?: string) =>
     invoke<string>("ftp_upload", { local, remote, transferId: transferId ?? null }),
   ftpDownload: (remote: string, local: string, transferId?: string) =>

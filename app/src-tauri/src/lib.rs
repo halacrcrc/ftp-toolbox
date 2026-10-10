@@ -656,6 +656,17 @@ async fn ftp_list(state: State<'_, AppState>, path: Option<String>) -> CmdResult
     client.list(path.as_deref()).await.map_err(err)
 }
 
+/// 结构化列目录（MLSD 优先，LIST 兜底），供远端文件树渲染大小/时间。
+#[tauri::command]
+async fn ftp_list_detailed(
+    state: State<'_, AppState>,
+    path: Option<String>,
+) -> CmdResult<Vec<ftp_core::ftp::FtpEntry>> {
+    let mut guard = state.ftp_client.lock().await;
+    let client = guard.as_mut().ok_or("未连接 FTP 服务器")?;
+    client.list_detailed(path.as_deref()).await.map_err(err)
+}
+
 #[tauri::command]
 async fn ftp_upload(
     app: AppHandle,
@@ -1384,6 +1395,7 @@ pub fn run() {
             ftp_connect,
             ftp_disconnect,
             ftp_list,
+            ftp_list_detailed,
             ftp_upload,
             ftp_download,
             tftp_upload,

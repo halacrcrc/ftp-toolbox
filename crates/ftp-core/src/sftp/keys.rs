@@ -236,6 +236,7 @@ pub fn clear_known_hosts(app_data: &Path) -> Result<()> {
 /// One trusted-host record for the management UI (`endpoint` = `host:port`,
 /// host lower-cased exactly like [`entry_key`]).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
 pub struct KnownHostRecord {
     pub endpoint: String,
     pub fingerprint: String,

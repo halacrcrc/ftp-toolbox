@@ -53,9 +53,13 @@ export default function App() {
   // views around their invoke; cleared when it settles). Non-null enables
   // the footer cancel button.
   const [activeTransferId, setActiveTransferId] = useState<string | null>(null);
-  // Server run state lives here (App never unmounts) and is re-read from the
-  // backend when the matching protocol page is opened — the pages themselves
-  // are mounted/unmounted on navigation, so component-local state would be lost.
+  // Server run state lives here (App never unmounts) and is pushed by the
+  // backend. The protocol pages themselves stay mounted across navigation
+  // (hidden via [hidden], see render below) so component-local client state —
+  // connection flag, form inputs, listings — survives view switches: the
+  // backend holds ftp/sftp client sessions in global AppState, so losing the
+  // UI flag used to present as "connection dropped" after visiting the log
+  // page, and TFTP inputs snapped back to defaults on remount.
   const [ftpStatus, setFtpStatus] = useState<ServerStatus | null>(null);
   const [tftpStatus, setTftpStatus] = useState<ServerStatus | null>(null);
   const [sftpStatus, setSftpStatus] = useState<SftpServerStatus | null>(null);
@@ -198,30 +202,33 @@ export default function App() {
           <h1>{TITLES[view]}</h1>
         </header>
         <main className="content">
-          {view === "ftp" && (
+          {/* 协议页常驻挂载，仅切换可见性：客户端连接标志与表单输入都是组件
+              内部状态，卸载即丢（后端会话仍在，但 UI 回到「未连接」、TFTP
+              地址还原默认）。日志页数据源在 App，无需常驻。 */}
+          <div hidden={view !== "ftp"}>
             <FtpPage
               log={log}
               ftpStatus={ftpStatus}
               refresh={refreshFtp}
               onTransferChange={setActiveTransferId}
             />
-          )}
-          {view === "tftp" && (
+          </div>
+          <div hidden={view !== "tftp"}>
             <TftpPage
               log={log}
               tftpStatus={tftpStatus}
               refresh={refreshTftp}
               onTransferChange={setActiveTransferId}
             />
-          )}
-          {view === "sftp" && (
+          </div>
+          <div hidden={view !== "sftp"}>
             <SftpPage
               log={log}
               sftpStatus={sftpStatus}
               refresh={refreshSftp}
               onTransferChange={setActiveTransferId}
             />
-          )}
+          </div>
           {view === "logs" && <LogView logs={logs} onClear={() => setLogs([])} />}
         </main>
         <ProgressBar

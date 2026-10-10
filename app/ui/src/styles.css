@@ -141,6 +141,13 @@ button {
   padding: 8px 28px 24px;
 }
 
+/* 协议页常驻挂载（见 App.tsx），仅用 hidden 属性切换可见性。
+   UA 默认的 [hidden] { display: none } 优先级低，会被任何针对子树的
+   author display 规则压过 —— 这里显式声明并提权，保证切换始终生效。 */
+[hidden] {
+  display: none !important;
+}
+
 /* ---------- cards ---------- */
 
 .grid-2 {

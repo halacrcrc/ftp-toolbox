@@ -98,6 +98,13 @@ export interface HostKeyStatus {
   fingerprint: string | null;
 }
 
+/** 一条已信任主机记录（known_hosts 行，sftp_client_list_known_hosts）。 */
+export interface KnownHostRecord {
+  /** `host:port`，host 已小写归一 */
+  endpoint: string;
+  fingerprint: string;
+}
+
 /** start_sftp_server 的选项，与后端 SftpServerOptions 字段一一对应。 */
 export interface SftpServerOptions {
   bindAddr: string;
@@ -238,8 +245,12 @@ export const api = {
   /** 主机密钥变化后，用户显式确认才允许覆盖 known_hosts 记录。 */
   sftpClientUpdateKnownHost: (host: string, port: number) =>
     invoke<string>("sftp_client_update_known_host", { host, port }),
-  sftpClientClearKnownHosts: () =>
-    invoke<string>("sftp_client_clear_known_hosts"),
+  /** 列出本机已信任的主机记录（TOFU known_hosts），供管理界面勾选。 */
+  sftpClientListKnownHosts: () =>
+    invoke<KnownHostRecord[]>("sftp_client_list_known_hosts"),
+  /** 移除勾选的已信任主机记录（按 `host:port` 匹配）。 */
+  sftpClientRemoveKnownHosts: (endpoints: string[]) =>
+    invoke<string>("sftp_client_remove_known_hosts", { endpoints }),
 
   /** 请求取消一个进行中的传输（引擎在下一个分块边界落地）。 */
   cancelTransfer: (transferId: string) =>

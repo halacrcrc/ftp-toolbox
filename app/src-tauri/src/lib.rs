@@ -1132,11 +1132,24 @@ async fn sftp_client_update_known_host(
     Ok(format!("已更新 {host}:{port} 的主机密钥记录（新指纹 {presented}）"))
 }
 
+/// 列出本机已信任的主机记录（TOFU known_hosts），供管理界面勾选移除。
 #[tauri::command]
-async fn sftp_client_clear_known_hosts(app: AppHandle) -> CmdResult<String> {
+async fn sftp_client_list_known_hosts(
+    app: AppHandle,
+) -> CmdResult<Vec<ftp_core::sftp::keys::KnownHostRecord>> {
     let app_data = app.path().app_data_dir().map_err(err)?;
-    ftp_core::sftp::keys::clear_known_hosts(&app_data).map_err(err)?;
-    Ok("已清除所有已信任主机的记录".into())
+    Ok(ftp_core::sftp::keys::list_known_hosts(&app_data))
+}
+
+/// 移除勾选的已信任主机记录（按 `host:port` 精确匹配，主机名大小写不敏感）。
+#[tauri::command]
+async fn sftp_client_remove_known_hosts(
+    app: AppHandle,
+    endpoints: Vec<String>,
+) -> CmdResult<String> {
+    let app_data = app.path().app_data_dir().map_err(err)?;
+    let removed = ftp_core::sftp::keys::remove_known_hosts(&app_data, &endpoints).map_err(err)?;
+    Ok(format!("已移除 {removed} 条已信任主机记录"))
 }
 
 // ---------- system info ----------
@@ -1386,7 +1399,8 @@ pub fn run() {
             sftp_client_upload,
             sftp_client_download,
             sftp_client_update_known_host,
-            sftp_client_clear_known_hosts,
+            sftp_client_list_known_hosts,
+            sftp_client_remove_known_hosts,
             cancel_transfer,
             list_interfaces,
         ])

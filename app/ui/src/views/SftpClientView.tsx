@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import { api, newTransferId, pathBase, HostKeyStatus, SftpEntry, SftpServerStatus } from "../api";
+import { api, newTransferId, pathBase, HostKeyStatus, KnownHostRecord, SftpEntry, SftpServerStatus } from "../api";
 import { fmtBytes } from "../lib/format";
 import LocalFileField from "../components/LocalFileField";
 import { LogEntry } from "../App";
@@ -56,8 +56,10 @@ export default function SftpClientView({
   const [local, setLocal] = useState(defaultLocal);
   const [remote, setRemote] = useState("hello.txt");
   const [prompt, setPrompt] = useState<HostKeyPrompt | null>(null);
-  // 「清除已信任主机」两步确认：第一次点击进入确认态，再点才真正执行
-  const [confirmClear, setConfirmClear] = useState(false);
+  // 「管理已信任主机」面板：null = 收起；展开时展示记录列表供勾选移除
+  const [knownHosts, setKnownHosts] = useState<KnownHostRecord[] | null>(null);
+  const [selectedHosts, setSelectedHosts] = useState<Set<string>>(new Set());
+  const [manageBusy, setManageBusy] = useState(false);
 
   const portNum = () => Number(port) || 22;
 
@@ -174,13 +176,39 @@ export default function SftpClientView({
     }
   };
 
-  const clearKnownHosts = async () => {
+  const openKnownHosts = async () => {
+    setManageBusy(true);
     try {
-      log(await api.sftpClientClearKnownHosts(), "ok");
+      setKnownHosts(await api.sftpClientListKnownHosts());
+      setSelectedHosts(new Set());
     } catch (e) {
-      log(`清除已信任主机失败: ${e}`, "error");
+      log(`读取已信任主机记录失败: ${e}`, "error");
     } finally {
-      setConfirmClear(false);
+      setManageBusy(false);
+    }
+  };
+
+  const toggleKnownHost = (endpoint: string) => {
+    setSelectedHosts((prev) => {
+      const next = new Set(prev);
+      if (next.has(endpoint)) next.delete(endpoint);
+      else next.add(endpoint);
+      return next;
+    });
+  };
+
+  const removeSelectedHosts = async () => {
+    if (selectedHosts.size === 0) return;
+    setManageBusy(true);
+    try {
+      log(await api.sftpClientRemoveKnownHosts([...selectedHosts]), "ok");
+      const remaining = (knownHosts ?? []).filter((r) => !selectedHosts.has(r.endpoint));
+      setKnownHosts(remaining);
+      setSelectedHosts(new Set());
+    } catch (e) {
+      log(`移除已信任主机记录失败: ${e}`, "error");
+    } finally {
+      setManageBusy(false);
     }
   };
 
@@ -293,24 +321,62 @@ export default function SftpClientView({
       <div className="card">
         <div className="card-title">设置</div>
         <div className="hint-line">
-          已信任的主机密钥记录（TOFU）保存在本机；清除后所有服务器都会重新走首连确认流程。
+          已信任的主机密钥记录（TOFU）保存在本机；可按需移除单条记录，移除后对应服务器会重新走首连确认流程。
         </div>
         <div className="actions">
-          {confirmClear ? (
-            <>
-              <button className="btn danger" onClick={clearKnownHosts} disabled={busy}>
-                确认清除
-              </button>
-              <button className="btn" onClick={() => setConfirmClear(false)} disabled={busy}>
-                取消
-              </button>
-            </>
-          ) : (
-            <button className="btn" onClick={() => setConfirmClear(true)} disabled={busy}>
-              清除已信任主机…
-            </button>
-          )}
+          <button
+            className="btn"
+            onClick={knownHosts ? () => setKnownHosts(null) : openKnownHosts}
+            disabled={manageBusy}
+          >
+            {knownHosts ? "收起已信任主机列表" : "管理已信任主机…"}
+          </button>
         </div>
+        {knownHosts && (
+          <div className="known-host-list">
+            {knownHosts.length === 0 ? (
+              <div className="hint-line">暂无已信任的主机记录。</div>
+            ) : (
+              <>
+                <label className="known-host-item known-host-head">
+                  <input
+                    type="checkbox"
+                    checked={selectedHosts.size === knownHosts.length}
+                    onChange={(e) =>
+                      setSelectedHosts(
+                        e.target.checked ? new Set(knownHosts.map((r) => r.endpoint)) : new Set()
+                      )
+                    }
+                  />
+                  <span>全选</span>
+                </label>
+                {knownHosts.map((r) => (
+                  <label key={r.endpoint} className="known-host-item">
+                    <input
+                      type="checkbox"
+                      checked={selectedHosts.has(r.endpoint)}
+                      onChange={() => toggleKnownHost(r.endpoint)}
+                    />
+                    <span className="known-host-endpoint">{r.endpoint}</span>
+                    <span className="known-host-fingerprint">{r.fingerprint}</span>
+                  </label>
+                ))}
+                <div className="actions">
+                  <button
+                    className="btn danger"
+                    onClick={removeSelectedHosts}
+                    disabled={manageBusy || selectedHosts.size === 0}
+                  >
+                    移除所选（{selectedHosts.size}）
+                  </button>
+                  <button className="btn" onClick={() => setKnownHosts(null)} disabled={manageBusy}>
+                    取消
+                  </button>
+                </div>
+              </>
+            )}
+          </div>
+        )}
       </div>
 
       {/* TOFU 主机密钥确认框（§4.4）：unknown 首连确认 / changed 变更警告 */}

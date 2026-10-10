@@ -570,6 +570,48 @@ button {
   white-space: pre-wrap;
 }
 
+/* 已信任主机管理列表（勾选移除） */
+.known-host-list {
+  margin-top: 4px;
+  background: #f8f9fa;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 8px 12px;
+  font-size: 12.5px;
+  max-height: 200px;
+  overflow: auto;
+}
+
+.known-host-item {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 3px 0;
+  cursor: pointer;
+  line-height: 1.6;
+}
+
+.known-host-head {
+  color: var(--text-3);
+  border-bottom: 1px solid var(--border);
+  padding-bottom: 5px;
+  margin-bottom: 3px;
+}
+
+.known-host-endpoint {
+  font-family: Consolas, "Courier New", monospace;
+  user-select: text;
+}
+
+.known-host-fingerprint {
+  color: var(--text-3);
+  font-family: Consolas, "Courier New", monospace;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  user-select: text;
+}
+
 .log-card {
   display: flex;
   flex-direction: column;

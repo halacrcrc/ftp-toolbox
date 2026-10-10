@@ -233,6 +233,55 @@ pub fn clear_known_hosts(app_data: &Path) -> Result<()> {
     Ok(())
 }
 
+/// One trusted-host record for the management UI (`endpoint` = `host:port`,
+/// host lower-cased exactly like [`entry_key`]).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct KnownHostRecord {
+    pub endpoint: String,
+    pub fingerprint: String,
+}
+
+/// All trusted-host records, in file order — the management list the user
+/// picks removal targets from.
+pub fn list_known_hosts(app_data: &Path) -> Vec<KnownHostRecord> {
+    read_known_hosts(app_data)
+        .into_iter()
+        .map(|(endpoint, fingerprint)| KnownHostRecord { endpoint, fingerprint })
+        .collect()
+}
+
+/// Remove the records whose endpoint matches one of `endpoints` (compare
+/// case-insensitively — the same normalization [`entry_key` applies to hosts).
+/// Returns how many records were dropped; unknown endpoints are simply
+/// ignored. Removing the last record deletes the file, mirroring
+/// [`clear_known_hosts`].
+pub fn remove_known_hosts(app_data: &Path, endpoints: &[String]) -> Result<usize> {
+    let mut kept = Vec::new();
+    let mut removed = 0usize;
+    for (key, fp) in read_known_hosts(app_data) {
+        if endpoints.iter().any(|e| e.eq_ignore_ascii_case(&key)) {
+            removed += 1;
+        } else {
+            kept.push(format!("{key} {fp}"));
+        }
+    }
+    if removed == 0 {
+        return Ok(0);
+    }
+    let path = known_hosts_path(app_data);
+    if kept.is_empty() {
+        if path.is_file() {
+            std::fs::remove_file(&path)?;
+        }
+        return Ok(removed);
+    }
+    if let Some(dir) = path.parent() {
+        std::fs::create_dir_all(dir)?;
+    }
+    write_known_hosts_file(&path, &(kept.join("\n") + "\n"))?;
+    Ok(removed)
+}
+
 fn entry_key(host: &str, port: u16) -> String {
     format!("{}:{port}", host.to_ascii_lowercase())
 }
@@ -392,6 +441,40 @@ mod tests {
             check_known_host(&dir, "example.com", 22, Some("SHA256:bbb")).status,
             HostKeyState::Unknown
         );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// 管理界面按记录移除（2026-10-10 用户需求）：勾选哪条删哪条，主机名
+    /// 大小写不敏感；删光后文件一并消失，未匹配的端点不动文件。
+    #[test]
+    fn known_hosts_list_and_selective_remove() {
+        let dir = tmp_dir("known-hosts-remove");
+        record_known_host(&dir, "a.example.com", 22, "SHA256:aaa").unwrap();
+        record_known_host(&dir, "B.Example.COM", 2222, "SHA256:bbb").unwrap();
+        record_known_host(&dir, "c.example.com", 22, "SHA256:ccc").unwrap();
+
+        let list = list_known_hosts(&dir);
+        assert_eq!(list.len(), 3, "三条记录都应列出: {list:?}");
+        assert!(list.contains(&KnownHostRecord {
+            endpoint: "b.example.com:2222".into(),
+            fingerprint: "SHA256:bbb".into()
+        }));
+
+        // 大小写不敏感地移除一条。
+        let removed = remove_known_hosts(&dir, &["B.EXAMPLE.com:2222".to_string()]).unwrap();
+        assert_eq!(removed, 1);
+        let list = list_known_hosts(&dir);
+        assert_eq!(list.len(), 2, "其余两条应保留: {list:?}");
+
+        // 未匹配的端点：0 条移除，文件不动。
+        assert_eq!(remove_known_hosts(&dir, &["nope:1".to_string()]).unwrap(), 0);
+        assert_eq!(list_known_hosts(&dir).len(), 2);
+
+        // 删光 → 文件一并删除。
+        let endpoints: Vec<String> = list.iter().map(|r| r.endpoint.clone()).collect();
+        assert_eq!(remove_known_hosts(&dir, &endpoints).unwrap(), 2);
+        assert!(list_known_hosts(&dir).is_empty());
+        assert!(!known_hosts_path(&dir).exists(), "删光后 known_hosts 文件应消失");
         let _ = std::fs::remove_dir_all(&dir);
     }
 

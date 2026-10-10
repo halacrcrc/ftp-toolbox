@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState } from "react";
-import { api, newTransferId, pathBase, HostKeyStatus, KnownHostRecord, SftpEntry, SftpServerStatus } from "../api";
+import { api, newTransferId, pathBase, pickSaveFile, HostKeyStatus, KnownHostRecord, SftpEntry, SftpServerStatus } from "../api";
+import { getCurrentWebview } from "@tauri-apps/api/webview";
 import RemoteTree, { RemoteEntry } from "../components/RemoteTree";
 import { joinRemote, parentRemote } from "../lib/remotepath";
 import LocalFileField from "../components/LocalFileField";
@@ -208,6 +209,74 @@ export default function SftpClientView({
     }
   };
 
+  /** 点树里的文件节点：弹「保存到…」对话框（预填文件名）后下载。 */
+  const downloadEntry = async (entry: RemoteEntry) => {
+    if (entry.kind === "dir") return;
+    const remotePath = joinRemote(currentPath, entry.name);
+    let localPath: string | null;
+    try {
+      localPath = await pickSaveFile(entry.name);
+    } catch (e) {
+      log(`打开保存对话框失败: ${e}`, "error");
+      return;
+    }
+    if (!localPath) return;
+    const transferId = newTransferId();
+    onTransferChange?.(transferId);
+    try {
+      log(await api.sftpClientDownload(remotePath, localPath, transferId), "ok");
+    } catch (e) {
+      log(`下载失败: ${e}`, "error");
+    } finally {
+      onTransferChange?.(null);
+    }
+  };
+
+  /** 拖入文件的落点统一为当前目录；多文件串行上传（单连接模型，勿并发）。 */
+  const uploadPaths = async (localPaths: string[]) => {
+    if (!connected || localPaths.length === 0) return;
+    for (const lp of localPaths) {
+      const remotePath = joinRemote(currentPath, pathBase(lp));
+      const transferId = newTransferId();
+      onTransferChange?.(transferId);
+      try {
+        log(await api.sftpClientUpload(lp, remotePath, transferId), "ok");
+      } catch (e) {
+        log(`上传失败: ${e}`, "error");
+      } finally {
+        onTransferChange?.(null);
+      }
+    }
+    // 全部结束后重拉当前目录，让新文件出现在树里
+    await openDir(currentPath, true);
+  };
+
+  // Tauri v2 拦截了 HTML5 drop 事件（dragDropEnabled 默认开），拖拽上传只能走
+  // webview 原生 onDragDropEvent：drop 事件直接给字符串绝对路径。用落点坐标做
+  // 一次「是否落在树区域」的命中检测（elementFromPoint + closest），避免在日志
+  // 页/传输卡上误触发。position 是物理像素，除以 devicePixelRatio 换算 CSS 坐标。
+  useEffect(() => {
+    let disposed = false;
+    let unlisten: (() => void) | null = null;
+    void getCurrentWebview()
+      .onDragDropEvent((event) => {
+        if (event.payload.type !== "drop") return;
+        const { paths, position } = event.payload;
+        const scale = window.devicePixelRatio || 1;
+        const el = document.elementFromPoint(position.x / scale, position.y / scale);
+        if (!el?.closest(".remote-tree")) return;
+        void uploadPaths(paths);
+      })
+      .then((fn) => {
+        if (disposed) fn();
+        else unlisten = fn;
+      });
+    return () => {
+      disposed = true;
+      unlisten?.();
+    };
+  });
+
   const openKnownHosts = async () => {
     setManageBusy(true);
     try {
@@ -316,7 +385,7 @@ export default function SftpClientView({
           onCrumb={(p) => void openDir(p, false)}
           onUp={() => void openDir(parentRemote(currentPath), true)}
           onRefresh={() => void openDir(currentPath, true)}
-          onDownload={(e) => log(`选中 ${e.name}，下载即将支持`)}
+          onDownload={(e) => void downloadEntry(e)}
         />
       </div>
 

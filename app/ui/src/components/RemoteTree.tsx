@@ -111,6 +111,9 @@ export default function RemoteTree({
         </div>
       </div>
       <div className="remote-tree-body">
+        {!disabled && (
+          <div className="remote-tree-hint">把本地文件拖到此区域即可上传到当前目录；点文件名下载。</div>
+        )}
         {loading ? (
           <div className="remote-tree-empty">加载中…</div>
         ) : entries === null ? (

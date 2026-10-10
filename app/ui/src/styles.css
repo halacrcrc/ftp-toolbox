@@ -687,6 +687,12 @@ button {
   padding: 6px 2px;
 }
 
+.remote-tree-hint {
+  color: var(--text-3);
+  font-size: 12px;
+  padding: 0 2px 4px;
+}
+
 .remote-tree-row {
   display: flex;
   align-items: center;

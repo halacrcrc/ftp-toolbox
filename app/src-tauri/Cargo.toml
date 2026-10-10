@@ -1,4 +1,4 @@
-﻿[package]
+[package]
 name = "ftp-toolbox-app"
 version = "0.5.1"
 edition.workspace = true

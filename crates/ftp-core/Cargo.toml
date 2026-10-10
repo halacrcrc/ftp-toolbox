@@ -1,4 +1,4 @@
-﻿[package]
+[package]
 name = "ftp-core"
 version = "0.5.1"
 edition.workspace = true

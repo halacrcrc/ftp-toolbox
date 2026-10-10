@@ -2,8 +2,6 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import {
   advanceSample,
-  doneSuffix,
-  elapsedSeconds,
   isSameStream,
   MIN_SPEED_WINDOW_MS,
   newSample,
@@ -18,7 +16,6 @@ function base(over: Partial<Progress> = {}): Progress {
     kind: "upload",
     bytes: 0,
     total: 1000,
-    startedAt: 0,
     speedBytes: 0,
     speedAt: 0,
     speed: 0,
@@ -49,17 +46,6 @@ test("sizeSuffix: 大小未知时明说，而不是留个转圈", () => {
   assert.equal(sizeSuffix(8283759), "（7.9 MB）");
 });
 
-test("doneSuffix: 没有 started 样本（elapsed 为 null）时只报大小", () => {
-  assert.equal(doneSuffix(1024, null), "1.0 KB");
-});
-
-test("doneSuffix: 总是报时长与平均速度，<1s 用整数毫秒避免 0.0s 假精度", () => {
-  // 4 KB 文件走回环几十毫秒传完是常态，速率是真实测到的，不该被阈值掐掉。
-  assert.equal(doneSuffix(1024, 0.05), "1.0 KB · 50 ms · 平均 20.0 KB/s");
-  assert.equal(doneSuffix(1024, 0.1), "1.0 KB · 100 ms · 平均 10.0 KB/s");
-  assert.equal(doneSuffix(2048, 1), "2.0 KB · 1.0s · 平均 2.0 KB/s");
-});
-
 // ---------- 样本推进 ----------
 
 test("newSample: started 事件建立零起点样本", () => {
@@ -69,7 +55,6 @@ test("newSample: started 事件建立零起点样本", () => {
     kind: "download",
     bytes: 0,
     total: 4096,
-    startedAt: 1000,
     speedBytes: 0,
     speedAt: 1000,
     speed: 0,
@@ -170,9 +155,4 @@ test("advanceSample: 不改动传入的样本", () => {
   assert.equal(b.speed, 400);
   assert.equal(b.bytes, 100);
   assert.equal(b.speedBytes, 100);
-});
-
-test("elapsedSeconds: 没有 started 样本时返回 null", () => {
-  assert.equal(elapsedSeconds(null, 5000), null);
-  assert.equal(elapsedSeconds(base({ startedAt: 1000 }), 3500), 2.5);
 });

@@ -10,8 +10,6 @@ import {
 // 传输的样本推进与日志文案都在 src/lib/transfer.ts（纯函数，带单测）。
 import {
   advanceSample,
-  doneSuffix,
-  elapsedSeconds,
   isSameStream,
   newSample,
   sizeSuffix,
@@ -170,13 +168,11 @@ export default function App() {
           apply(advanceSample(prev ?? newSample(ev, now), ev, now));
           break;
         }
-        case "done": {
-          const bytes = ev.bytes ?? 0;
-          const elapsed = elapsedSeconds(prev, Date.now());
-          log(`完成: ${ev.file}（${doneSuffix(bytes, elapsed)}）`, "ok");
+        case "done":
+          // 完成日志由各客户端视图记命令返回值（自带大小/时长/速度），这里
+          // 不再重复打一行，只清掉底部进度条（2026-10-10 用户反馈两行重复）。
           apply(null);
           break;
-        }
         case "error":
           log(`传输错误: ${ev.file}: ${ev.message ?? "未知错误"}`, "error");
           apply(null);

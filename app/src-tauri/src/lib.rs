@@ -49,6 +49,35 @@ fn err<E: std::fmt::Display>(e: E) -> String {
     e.to_string()
 }
 
+/// 传输统计文案：「1.4 MB，用时 3.2 秒，平均 448 KB/s」。
+/// 完成日志必须同时给出大小/时长/平均速度（2026-10-10 用户反馈）；不足 1 秒
+/// 用整数毫秒，避免小文件出现 0.0 秒的假精度。
+fn transfer_stats(bytes: u64, elapsed: std::time::Duration) -> String {
+    // 1024 进制人类可读大小，与前端 fmtBytes 口径一致。
+    fn fmt(bytes: u64) -> String {
+        const UNITS: [&str; 5] = ["B", "KB", "MB", "GB", "TB"];
+        let mut v = bytes as f64;
+        let mut u = 0;
+        while v >= 1024.0 && u < UNITS.len() - 1 {
+            v /= 1024.0;
+            u += 1;
+        }
+        if u == 0 {
+            format!("{bytes} B")
+        } else {
+            format!("{v:.1} {}", UNITS[u])
+        }
+    }
+    let secs = elapsed.as_secs_f64();
+    let duration = if secs < 1.0 {
+        format!("{} 毫秒", elapsed.as_millis())
+    } else {
+        format!("{secs:.1} 秒")
+    };
+    let speed = fmt((bytes as f64 / secs.max(1e-9)) as u64);
+    format!("{}，用时 {}，平均 {speed}/s", fmt(bytes), duration)
+}
+
 /// Forward engine progress events to the frontend as "transfer-progress".
 fn progress_forwarder(app: &AppHandle) -> ProgressTx {
     let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
@@ -682,11 +711,15 @@ async fn ftp_upload(
         // 拿到会话锁之后才注册令牌：否则排队中的传输也会亮起取消按钮，
         // 用户以为在取消正在跑的传输，实际取消的是还没开始的这个。
         let token = transfer_id.as_deref().map(|id| state.cancels.register(id));
+        // 大小取本地源文件；统计在命令层兜底，完成日志必带速率（不依赖前端事件链）。
+        let total = tokio::fs::metadata(&local).await.map(|m| m.len()).unwrap_or(0);
+        let started = std::time::Instant::now();
         client
             .upload(std::path::Path::new(&local), &remote, Some(tx), token)
             .await
             .map_err(err)?;
-        Ok(format!("上传完成: {remote}"))
+        let stats = transfer_stats(total, started.elapsed());
+        Ok(format!("上传完成: {remote}（{stats}）"))
     }
     .await;
     if let Some(id) = transfer_id.as_deref() {
@@ -708,11 +741,15 @@ async fn ftp_download(
         let mut guard = state.ftp_client.lock().await;
         let client = guard.as_mut().ok_or("未连接 FTP 服务器")?;
         let token = transfer_id.as_deref().map(|id| state.cancels.register(id));
+        let started = std::time::Instant::now();
         client
             .download(&remote, std::path::Path::new(&local), Some(tx), token)
             .await
             .map_err(err)?;
-        Ok(format!("下载完成: {remote}"))
+        // 下载大小落在落盘文件上，传输后读一次即是收到的字节数。
+        let total = tokio::fs::metadata(&local).await.map(|m| m.len()).unwrap_or(0);
+        let stats = transfer_stats(total, started.elapsed());
+        Ok(format!("下载完成: {remote}（{stats}）"))
     }
     .await;
     if let Some(id) = transfer_id.as_deref() {
@@ -1090,11 +1127,17 @@ async fn sftp_client_upload(
         let guard = state.sftp_client.lock().await;
         let client = guard.as_ref().ok_or("未连接 SFTP 服务器")?;
         let token = transfer_id.as_deref().map(|id| state.cancels.register(id));
+        let total = tokio::fs::metadata(&local_path)
+            .await
+            .map(|m| m.len())
+            .unwrap_or(0);
+        let started = std::time::Instant::now();
         client
             .upload_file(std::path::Path::new(&local_path), &remote_path, Some(tx), token)
             .await
             .map_err(err)?;
-        Ok(format!("上传完成: {remote_path}"))
+        let stats = transfer_stats(total, started.elapsed());
+        Ok(format!("上传完成: {remote_path}（{stats}）"))
     }
     .await;
     if let Some(id) = transfer_id.as_deref() {
@@ -1116,11 +1159,17 @@ async fn sftp_client_download(
         let guard = state.sftp_client.lock().await;
         let client = guard.as_ref().ok_or("未连接 SFTP 服务器")?;
         let token = transfer_id.as_deref().map(|id| state.cancels.register(id));
+        let started = std::time::Instant::now();
         client
             .download_file(&remote_path, std::path::Path::new(&local_path), Some(tx), token)
             .await
             .map_err(err)?;
-        Ok(format!("下载完成: {remote_path}"))
+        let total = tokio::fs::metadata(&local_path)
+            .await
+            .map(|m| m.len())
+            .unwrap_or(0);
+        let stats = transfer_stats(total, started.elapsed());
+        Ok(format!("下载完成: {remote_path}（{stats}）"))
     }
     .await;
     if let Some(id) = transfer_id.as_deref() {
@@ -1423,3 +1472,25 @@ pub fn run() {
 // 被动端口段的解析、保留段比对与建议逻辑都在 ftp_core::ftp::passive，连同
 // 它的单测 —— 放在这里每跑一次都要链一遍完整 GUI 二进制，而它本来也不属于
 // 「薄壳」该管的事。
+
+#[cfg(test)]
+mod tests {
+    use super::transfer_stats;
+    use std::time::Duration;
+
+    #[test]
+    fn stats_line_carries_size_duration_and_speed() {
+        assert_eq!(
+            transfer_stats(1024 * 1024, Duration::from_millis(2000)),
+            "1.0 MB，用时 2.0 秒，平均 512.0 KB/s"
+        );
+    }
+
+    #[test]
+    fn small_files_use_milliseconds_instead_of_fake_zero_seconds() {
+        assert_eq!(
+            transfer_stats(256, Duration::from_millis(35)),
+            "256 B，用时 35 毫秒，平均 7.1 KB/s"
+        );
+    }
+}

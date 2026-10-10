@@ -43,8 +43,6 @@ export interface Progress {
   kind: TransferKind;
   bytes: number;
   total: number | null;
-  /** 起始时间（ms epoch）—— 已用时长与平均速度的基准。 */
-  startedAt: number;
   /**
    * 当前测速窗口的起点：在 `speedAt` 时刻已传输 `speedBytes` 字节。
    *
@@ -82,25 +80,6 @@ export function sizeSuffix(total: number | null): string {
 }
 
 /**
- * "7.9 MB · 2.4s · 平均 3.3 MB/s"——done 事件用的后缀。
- *
- * 只要量得到时长就带上时长与平均速度：回环小文件几十毫秒传完是常态，
- * 那个速率是真实测到的，掐掉它日志就只剩一个大小（2026-10-10 用户反馈）。
- * 假精度问题换格式解决而不是靠阈值：< 1s 用整数毫秒，避免旧的
- * "0.0s · 平均 51 MB/s" 那种一位小数伪装出来的精度。
- */
-export function doneSuffix(bytes: number, elapsed: number | null): string {
-  const parts = [fmtBytes(bytes)];
-  if (elapsed !== null && elapsed > 0) {
-    parts.push(
-      elapsed >= 1 ? `${elapsed.toFixed(1)}s` : `${Math.max(1, Math.round(elapsed * 1000))} ms`
-    );
-    parts.push(`平均 ${fmtBytes(bytes / elapsed)}/s`);
-  }
-  return parts.join(" · ");
-}
-
-/**
  * 两条进度是否属于同一条流。文件与方向都对上才算，缺一个就重开样本 ——
  * 这挡住了回环场景：两条流共用页脚那一个槽位，若把新文件的字节数折进
  * 旧文件的速率，会算出一个荒唐的速度尖峰。
@@ -116,7 +95,6 @@ export function newSample(ev: TransferEvent, now: number): Progress {
     kind: ev.kind,
     bytes: 0,
     total: ev.total ?? null,
-    startedAt: now,
     speedBytes: 0,
     speedAt: now,
     speed: 0,
@@ -141,9 +119,4 @@ export function advanceSample(base: Progress, ev: TransferEvent, now: number): P
   const instant = Math.max(0, bytes - base.speedBytes) / (span / 1000);
   const speed = base.speed > 0 ? base.speed * 0.7 + instant * 0.3 : instant;
   return { ...advanced, speed, speedBytes: bytes, speedAt: now };
-}
-
-/** 已用秒数；没有 started 样本（只有 done）时为 null。 */
-export function elapsedSeconds(prev: Progress | null, now: number): number | null {
-  return prev ? (now - prev.startedAt) / 1000 : null;
 }

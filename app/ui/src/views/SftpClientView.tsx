@@ -208,7 +208,9 @@ export default function SftpClientView({
   /**
    * 递归上传一个本地文件夹：远端按父先序逐级建目录后逐文件上传（串行），
    * 返回 [成功文件数, 失败文件数]。mkdir 对已存在目录会报错——重传到既有
-   * 结构是常见场景，按提示日志处理、不阻断不计失败，文件错误才是真信号。
+   * 结构是常见场景，不能直接吞：mkdir 失败后用一次列目录复核，能列出 =
+   * 目录确实在（继续）；列不出 = 真不可用（权限拒绝等），其下文件全部计
+   * 失败跳过，不再静默（评审 #34/#35，失败口径统一为「文件数」）。
    */
   const uploadFolderInto = async (
     localRoot: string,
@@ -218,16 +220,36 @@ export default function SftpClientView({
     let failed = 0;
     const w = await api.localWalk(localRoot);
     for (const s of w.skipped) log(`跳过链接 ${s}（可能成环，不参与上传）`);
-    const mk = async (p: string) => {
+    const okDirs = new Set<string>();
+    const mk = async (rel: string, p: string): Promise<boolean> => {
       try {
         await api.sftpClientMkdir(p);
+        return true;
       } catch {
-        log(`目录已存在或创建失败，继续: ${p}`);
+        try {
+          await api.sftpClientList(p);
+          log(`目录已存在，继续: ${p}`);
+          return true;
+        } catch (e) {
+          log(`目录不可用，其下文件跳过: ${p}: ${e}`, "error");
+          return false;
+        }
       }
     };
-    await mk(remoteBase);
-    for (const d of w.dirs) await mk(joinRemote(remoteBase, d));
+    if (await mk("", remoteBase)) okDirs.add("");
+    for (const d of w.dirs) {
+      if (await mk(d, joinRemote(remoteBase, d))) okDirs.add(d);
+    }
     for (const f of w.files) {
+      // 文件的直接父目录不可用 → 该文件无法上传（建目录是父先序，直接父
+      // 可用即整条链可用）。
+      const i = Math.max(f.lastIndexOf("/"), f.lastIndexOf("\\"));
+      const dirRel = i > 0 ? f.slice(0, i) : "";
+      if (!okDirs.has(dirRel)) {
+        failed++;
+        log(`跳过 ${f}（所在目录创建失败）`, "error");
+        continue;
+      }
       const transferId = newTransferId();
       onTransferChange?.(transferId);
       try {
@@ -368,9 +390,9 @@ export default function SftpClientView({
             try {
               await api.createLocalDir(sub);
             } catch (err) {
-              failed++;
-              log(`创建目录失败: ${sub}: ${err}`, "error");
-              continue;
+              // 建不出来不 continue：子树照常递归，文件会因本地目录缺失
+              // 各自失败计数——口径保持「失败文件数」（评审 #35）。
+              log(`创建目录失败（其下文件将逐一失败）: ${sub}: ${err}`, "error");
             }
             try {
               const kids = await api.sftpClientList(joinRemote(remoteDir, e.name));

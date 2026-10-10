@@ -30,6 +30,8 @@ interface RemoteTreeProps {
   onRefresh(): void;
   /** 点文件行触发下载（M1 仅占位，M2 接保存对话框）。 */
   onDownload(entry: RemoteEntry): void;
+  /** 可选：点「上传」按钮打开系统文件选择器（父组件接手后续上传流程）。 */
+  onUpload?(): void;
 }
 
 /** 行首类型标记，与旧 `<pre>` 列表的 d/-/l 记法保持一致。 */
@@ -68,6 +70,7 @@ export default function RemoteTree({
   onUp,
   onRefresh,
   onDownload,
+  onUpload,
 }: RemoteTreeProps) {
   const crumbs: RemoteCrumb[] = crumbsRemote(currentPath);
   const atRoot = isRoot(currentPath);
@@ -108,11 +111,23 @@ export default function RemoteTree({
           >
             刷新
           </button>
+          {onUpload && (
+            <button
+              type="button"
+              className="btn small"
+              disabled={disabled}
+              onClick={onUpload}
+            >
+              上传
+            </button>
+          )}
         </div>
       </div>
       <div className="remote-tree-body">
         {!disabled && (
-          <div className="remote-tree-hint">把本地文件拖到此区域即可上传到当前目录；点文件名下载。</div>
+          <div className="remote-tree-hint">
+            点「上传」选择文件、或把文件拖到此区域，即可上传到当前目录；点文件名下载。
+          </div>
         )}
         {loading ? (
           <div className="remote-tree-empty">加载中…</div>

@@ -293,6 +293,13 @@ export async function pickSaveFile(defaultPath?: string): Promise<string | null>
   return typeof selected === "string" ? selected : null;
 }
 
+/** Open the native Windows file picker (multi-select); null when cancelled. */
+export async function pickOpenFiles(): Promise<string[] | null> {
+  const selected = await open({ multiple: true });
+  if (selected === null) return null;
+  return Array.isArray(selected) ? selected : [selected];
+}
+
 /** Directory part of a Windows/POSIX path, with the trailing separator kept. */
 export function pathDir(p: string): string {
   const i = Math.max(p.lastIndexOf("\\"), p.lastIndexOf("/"));

@@ -1,9 +1,8 @@
 import { useEffect, useRef, useState } from "react";
-import { api, newTransferId, pathBase, pickSaveFile, HostKeyStatus, KnownHostRecord, SftpEntry, SftpServerStatus } from "../api";
+import { api, newTransferId, pathBase, pickOpenFiles, pickSaveFile, HostKeyStatus, KnownHostRecord, SftpEntry, SftpServerStatus } from "../api";
 import { getCurrentWebview } from "@tauri-apps/api/webview";
 import RemoteTree, { RemoteEntry } from "../components/RemoteTree";
 import { joinRemote, parentRemote } from "../lib/remotepath";
-import LocalFileField from "../components/LocalFileField";
 import { LogEntry } from "../App";
 
 type Log = (text: string, level?: LogEntry["level"]) => void;
@@ -37,13 +36,10 @@ function toRemoteEntry(e: SftpEntry): RemoteEntry {
 export default function SftpClientView({
   log,
   onTransferChange,
-  defaultLocal,
   serverStatus,
 }: {
   log: Log;
   onTransferChange?: TransferChange;
-  /** 本地默认文件路径（文档目录下），由页面传入。 */
-  defaultLocal: string;
   /** 本机 SFTP 服务器运行态（App 下推）；用于停服时回落客户端状态。 */
   serverStatus: SftpServerStatus | null;
 }) {
@@ -59,8 +55,6 @@ export default function SftpClientView({
   const [entries, setEntries] = useState<RemoteEntry[] | null>(null);
   const [treeLoading, setTreeLoading] = useState(false);
   const treeCache = useRef(new Map<string, RemoteEntry[]>());
-  const [local, setLocal] = useState(defaultLocal);
-  const [remote, setRemote] = useState("hello.txt");
   const [prompt, setPrompt] = useState<HostKeyPrompt | null>(null);
   // 「管理已信任主机」面板：null = 收起；展开时展示记录列表供勾选移除
   const [knownHosts, setKnownHosts] = useState<KnownHostRecord[] | null>(null);
@@ -193,22 +187,6 @@ export default function SftpClientView({
     }
   }, [serverStatus, connected, port, log]);
 
-  const transfer = async (kind: "upload" | "download") => {
-    const transferId = newTransferId();
-    onTransferChange?.(transferId);
-    try {
-      const msg =
-        kind === "upload"
-          ? await api.sftpClientUpload(local, remote, transferId)
-          : await api.sftpClientDownload(remote, local, transferId);
-      log(msg, "ok");
-    } catch (e) {
-      log(`${kind === "upload" ? "上传" : "下载"}失败: ${e}`, "error");
-    } finally {
-      onTransferChange?.(null);
-    }
-  };
-
   /** 点树里的文件节点：弹「保存到…」对话框（预填文件名）后下载。 */
   const downloadEntry = async (entry: RemoteEntry) => {
     if (entry.kind === "dir") return;
@@ -249,6 +227,18 @@ export default function SftpClientView({
     }
     // 全部结束后重拉当前目录，让新文件出现在树里
     await openDir(currentPath, true);
+  };
+
+  /** 「上传」按钮：打开系统文件选择器（可多选），选中的文件上传到当前目录。 */
+  const pickAndUpload = async () => {
+    let files: string[] | null;
+    try {
+      files = await pickOpenFiles();
+    } catch (e) {
+      log(`打开文件选择器失败: ${e}`, "error");
+      return;
+    }
+    if (files) await uploadPaths(files);
   };
 
   // Tauri v2 拦截了 HTML5 drop 事件（dragDropEnabled 默认开），拖拽上传只能走
@@ -386,31 +376,8 @@ export default function SftpClientView({
           onUp={() => void openDir(parentRemote(currentPath), true)}
           onRefresh={() => void openDir(currentPath, true)}
           onDownload={(e) => void downloadEntry(e)}
+          onUpload={() => void pickAndUpload()}
         />
-      </div>
-
-      <div className="card">
-        <div className="card-title">文件传输</div>
-        <LocalFileField
-          value={local}
-          onChange={setLocal}
-          onPicked={(p) => setRemote(pathBase(p))}
-          saveName={remote}
-          disabled={!connected}
-          log={log}
-        />
-        <label className="field">
-          <span>远程文件名</span>
-          <input value={remote} onChange={(e) => setRemote(e.target.value)} disabled={!connected} />
-        </label>
-        <div className="actions">
-          <button className="btn primary" onClick={() => transfer("upload")} disabled={!connected}>
-            上传
-          </button>
-          <button className="btn" onClick={() => transfer("download")} disabled={!connected}>
-            下载
-          </button>
-        </div>
       </div>
 
       <div className="card">

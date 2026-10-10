@@ -44,7 +44,7 @@ sftp/
 - `host_key_paths(app_data)`：目录 `keys/`，私钥 `sftp_host_ed25519`、公钥 `sftp_host_ed25519.pub`
 - `load_or_generate_host_key(app_data) -> Result<(PrivateKey, HostKeyInfo)>`：镜像 `tls.rs` 的 load-or-generate 模式；生成后私钥文件权限收紧
 - `known_hosts` 文件：`app-data/keys/known_hosts`，自用简单格式，每行 `host:port SHA256:<base64>`
-- `check_known_host(host, port) -> HostKeyStatus`、`record_known_host`、`update_known_host`、`clear_known_hosts`
+- `check_known_host(host, port) -> HostKeyStatus`、`record_known_host`、`update_known_host`、`list_known_hosts`、`remove_known_hosts`
 
 ### 2.2 server.rs
 
@@ -90,7 +90,7 @@ impl SftpClient {
   - `unknown`（首连）：UI 弹确认框显示指纹 → 用户确认后带 `trust_new_host = true` 重连 → 记入 known_hosts
   - `changed`（硬失败）：UI 明确警告"不是上次那台服务器" → 用户可在确认后调 `sftp_client_update_known_host(host, port)` 覆盖
 - `connect` 内部仍要校验：unknown 且未 trust → 拒绝；changed → 一律拒绝（更新只能走显式命令）
-- "清除已信任主机"入口调 `sftp_client_clear_known_hosts()`
+- "管理已信任主机…"入口调 `sftp_client_list_known_hosts()` 列出记录、勾选后调 `sftp_client_remove_known_hosts(endpoints)` 按条移除
 
 ## 三、Tauri 命令层契约（app/src-tauri/src/lib.rs）
 
@@ -108,7 +108,8 @@ impl SftpClient {
 | `sftp_client_upload` | `(local_path, remote_path) -> Result<()>` |
 | `sftp_client_download` | `(remote_path, local_path) -> Result<()>` |
 | `sftp_client_update_known_host` | `(host, port) -> Result<()>` |
-| `sftp_client_clear_known_hosts` | `() -> Result<()>` |
+| `sftp_client_list_known_hosts` | `() -> Result<Vec<KnownHostRecord>>` |
+| `sftp_client_remove_known_hosts` | `(endpoints: Vec<String>) -> Result<usize>` |
 
 DTO（`SftpServerOptions` 等）字段命名与前端 `types.ts` 一一对应（蛇形/驼峰按现有惯例）：
 - `SftpServerOptions { bind_addr, port, username, password, authorized_keys, root_dir, read_only }`
@@ -149,7 +150,7 @@ AppState 扩展（镜像现有字段）：
 - 连接表单：host / port（默认 22 客户端连远端用 22，输入框占位提示）/ username / password
 - 首连流程：connect 前 `check_host_key` → `unknown`/`changed` 弹确认框（显示指纹，changed 用警告文案）→ 确认后 `trust_new_host=true` 重连或先 `update_known_host` → 再连
 - 远端列表 / 上传 / 下载：交互与 FtpClientView 一致
-- 客户端设置区加"清除已信任主机"按钮（`sftp_client_clear_known_hosts`），带确认提示
+- 客户端设置区加"管理已信任主机…"按钮（`sftp_client_list_known_hosts`），展开记录列表（host:port + 指纹）供勾选移除（`sftp_client_remove_known_hosts`），支持全选；空列表显示提示
 
 ### 4.5 api.ts / types.ts
 

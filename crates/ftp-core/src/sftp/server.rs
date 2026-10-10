@@ -134,6 +134,12 @@ impl SftpServerHandle {
     }
 
     /// Stop the server and wait until the accept loop has finished.
+    ///
+    /// Active SSH/SFTP sessions are closed too: every session task subscribes
+    /// to the stop signal (see [`spawn_ssh_session`]) and exits — dropping the
+    /// TCP stream — as soon as it fires, exactly like the FTP server's
+    /// `spawn_session`. Stopping therefore means "nobody is being served
+    /// anymore", not "new connections refused while old ones keep working".
     pub async fn stop(mut self) {
         self.signal_stop();
         let _ = (&mut self.join).await;
@@ -217,6 +223,9 @@ pub async fn start_sftp_server(
         let russh_config = Arc::clone(&russh_config);
         let mut stop_rx = stop_tx.subscribe();
         let mut shutdown_rx = shutdown;
+        // Kept alive for the whole loop so every accepted session can
+        // subscribe its own receiver (mirrors ftp::server::start_server_with).
+        let session_tx = stop_tx.clone();
         let listen_for_log = local_addr.clone();
         async move {
             // Clears `running` and notifies subscribers on *any* exit path.
@@ -241,6 +250,7 @@ pub async fn start_sftp_server(
                                 Arc::clone(&session_cfg),
                                 Arc::clone(&russh_config),
                                 shared.session(),
+                                session_tx.subscribe(),
                                 stream,
                                 peer,
                             );
@@ -281,27 +291,64 @@ struct SessionConfig {
     progress: Option<ProgressTx>,
 }
 
-/// Serve one accepted SSH connection. The session guard keeps the UI's
-/// connection count honest; the connection ends when `run_stream`'s session
-/// future completes (peer disconnect or handshake failure).
+/// Serve one accepted SSH connection, closing it early when the server stops.
+///
+/// The session guard keeps the UI's connection count honest. `stop_rx` ties
+/// the session to the server lifecycle。注意 russh 的 `run_stream` 在握手完成后
+/// 会把会话交给它自己 spawn 的内部任务（`RunningSession` 只是 `JoinHandle`
+/// 的包装，drop 它并不 abort 会话），所以不能靠「放弃 future」关连接：
+/// 握手阶段流还握在本 future 手里，stop 一到直接 drop 即断；会话阶段必须拿
+/// `RunningSession::handle()` 调 `disconnect`，由 russh 的会话循环发出
+/// SSH_MSG_DISCONNECT 并退出、流随之关闭。旧版脱管任务会在服务器停止后
+/// 继续服务——那把「停止服务」变成「只拒新连接」，用户以为共享结束了对方
+/// 却还能拉文件（2026-10-10 用户实测踩中）。
 #[allow(clippy::too_many_arguments)]
 fn spawn_ssh_session(
     cfg: Arc<SessionConfig>,
     russh_config: Arc<russh::server::Config>,
     session: crate::lifecycle::SessionGuard,
+    mut stop_rx: broadcast::Receiver<()>,
     stream: tokio::net::TcpStream,
     peer: SocketAddr,
 ) {
     tokio::spawn(async move {
         let _session = session;
         let handler = SshSession { cfg, channel: None };
-        match russh::server::run_stream(russh_config, stream, handler).await {
-            Ok(running) => match running.await {
+
+        // 阶段一：握手。TCP 流仍由本 future 持有，stop 一到 drop 即断。
+        let running = tokio::select! {
+            started = russh::server::run_stream(russh_config, stream, handler) => match started {
+                Ok(running) => running,
+                // e.g. peer hung up mid-handshake — noisy at info level.
+                Err(e) => {
+                    debug!(%peer, "sftp handshake failed: {e}");
+                    return;
+                }
+            },
+            _ = stop_rx.recv() => {
+                info!(%peer, "closing sftp session because the server is stopping");
+                return;
+            }
+        };
+
+        // 阶段二：会话已由 russh 的内部任务驱动。stop 时通过 handle 断开，
+        // 而不是 drop running——那只会放弃 JoinHandle，连接照常活着。
+        let handle = running.handle();
+        tokio::select! {
+            result = running => match result {
                 Ok(()) => debug!(%peer, "sftp connection closed"),
                 Err(e) => debug!(%peer, "sftp connection ended: {e}"),
             },
-            // e.g. peer hung up mid-handshake — noisy at info level.
-            Err(e) => debug!(%peer, "sftp handshake failed: {e}"),
+            _ = stop_rx.recv() => {
+                info!(%peer, "closing sftp session because the server is stopping");
+                let _ = handle
+                    .disconnect(
+                        russh::Disconnect::ByApplication,
+                        "server stopping".into(),
+                        "en".into(),
+                    )
+                    .await;
+            }
         }
     });
 }

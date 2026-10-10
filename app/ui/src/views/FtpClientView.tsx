@@ -1,5 +1,5 @@
-import { useState } from "react";
-import { api, newTransferId, pathBase } from "../api";
+import { useEffect, useState } from "react";
+import { api, newTransferId, pathBase, ServerStatus } from "../api";
 import LocalFileField from "../components/LocalFileField";
 import { LogEntry } from "../App";
 
@@ -12,11 +12,14 @@ export default function FtpClientView({
   log,
   onTransferChange,
   defaultLocal,
+  serverStatus,
 }: {
   log: Log;
   onTransferChange?: TransferChange;
   /** 本地默认文件路径（文档目录下），由页面传入。 */
   defaultLocal: string;
+  /** 本机 FTP 服务器运行态（App 下推）；用于停服时回落客户端状态。 */
+  serverStatus: ServerStatus | null;
 }) {
   const [addr, setAddr] = useState("127.0.0.1:2121");
   const [user, setUser] = useState("anonymous");
@@ -57,6 +60,27 @@ export default function FtpClientView({
       setBusy(false);
     }
   };
+
+  // 本机服务器停止时，客户端若正连着它，立即回落「未连接」。停服时服务器
+  // 会关闭已建立的会话（spawn_session 订阅 stop 信号），控制连接真实断开，
+  // 但 FTP 协议没有服务端推送、客户端也没有控制通道后台读取器——不主动
+  // 比对就一直显示「已连接」（2026-10-10 用户实测）。
+  // 只按端口匹配：localAddr 可能是 0.0.0.0:x 而客户端填 127.0.0.1:x；
+  // 恰好连着同端口远程服务器且本机同端口服务器恰好停止才会误重置，可接受。
+  // 远程服务器自身崩溃仍要等下次操作报错——协议层没有通知，可后续加 NOOP 保活。
+  // 后端死会话不在此清理：下一次 ftpConnect 会整体替换它。
+  useEffect(() => {
+    if (!connected) return;
+    if (!serverStatus || serverStatus.running || !serverStatus.localAddr) return;
+    const ourPort = serverStatus.localAddr.split(":").pop();
+    const myPort = addr.trim().split(":").pop();
+    if (ourPort && ourPort === myPort) {
+      setConnected(false);
+      setListing(null);
+      setRemotePath("");
+      log(`本机服务器已停止（${serverStatus.localAddr}），连接已断开`, "error");
+    }
+  }, [serverStatus, connected, addr, log]);
 
   const refresh = async () => {
     try {

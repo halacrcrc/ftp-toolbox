@@ -1,5 +1,5 @@
-import { useState } from "react";
-import { api, newTransferId, pathBase, HostKeyStatus, SftpEntry } from "../api";
+import { useEffect, useState } from "react";
+import { api, newTransferId, pathBase, HostKeyStatus, SftpEntry, SftpServerStatus } from "../api";
 import { fmtBytes } from "../lib/format";
 import LocalFileField from "../components/LocalFileField";
 import { LogEntry } from "../App";
@@ -35,11 +35,14 @@ export default function SftpClientView({
   log,
   onTransferChange,
   defaultLocal,
+  serverStatus,
 }: {
   log: Log;
   onTransferChange?: TransferChange;
   /** 本地默认文件路径（文档目录下），由页面传入。 */
   defaultLocal: string;
+  /** 本机 SFTP 服务器运行态（App 下推）；用于停服时回落客户端状态。 */
+  serverStatus: SftpServerStatus | null;
 }) {
   // 连接远端用标准 SSH 端口 22（本应用自己的服务器默认 2222，输入框可改）
   const [host, setHost] = useState("127.0.0.1");
@@ -126,6 +129,24 @@ export default function SftpClientView({
       setBusy(false);
     }
   };
+
+  // 本机服务器停止时，客户端若正连着它，立即回落「未连接」。停服会话由服务
+  // 器关闭（spawn_ssh_session 收到 stop 后走 handle.disconnect 断开 SSH 连
+  // 接），但 SSH 协议没有服务端推送、
+  // 客户端也没有后台读取器，不主动比对就一直显示「已连接」。只按端口匹配
+  // （host 可能写 127.0.0.1 也可能写本机其它地址）；远程服务器自身崩溃仍要
+  // 等下次操作报错，可后续加 SSH keepalive。后端死会话由下一次连接整体替换。
+  useEffect(() => {
+    if (!connected) return;
+    if (!serverStatus || serverStatus.running || !serverStatus.localAddr) return;
+    const ourPort = serverStatus.localAddr.split(":").pop();
+    if (ourPort && ourPort === port.trim()) {
+      setConnected(false);
+      setListing(null);
+      setRemotePath("");
+      log(`本机服务器已停止（${serverStatus.localAddr}），连接已断开`, "error");
+    }
+  }, [serverStatus, connected, port, log]);
 
   const refresh = async () => {
     try {

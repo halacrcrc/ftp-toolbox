@@ -66,6 +66,7 @@ export default function FtpPage({ log, ftpStatus, refresh, onTransferChange, def
         log={log}
         onTransferChange={onTransferChange}
         defaultLocal={joinDefault(defaultBase, "ftp-root", "hello.txt")}
+        serverStatus={ftpStatus}
       />
     </div>
   );

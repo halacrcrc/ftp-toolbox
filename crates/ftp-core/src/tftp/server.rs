@@ -95,6 +95,9 @@ pub async fn start_server(root: PathBuf, bind: String) -> Result<TftpServerHandl
         let local = local.clone();
         let shared = Arc::clone(&shared);
         let mut stop_rx = stop_tx.subscribe();
+        // Kept alive for the whole loop so every transfer task can subscribe
+        // its own receiver（与 ftp/sftp 的会话停止语义对齐）。
+        let session_tx = stop_tx.clone();
         async move {
             // Clears `running` and notifies subscribers on any exit path.
             let _loop_guard = shared.loop_guard();
@@ -126,10 +129,21 @@ pub async fn start_server(root: PathBuf, bind: String) -> Result<TftpServerHandl
                 };
                 let root = Arc::clone(&root);
                 let session = shared.session();
+                // 传输任务订阅停服信号：停止后进行中的传输立即终止（socket 随
+                // 任务 drop，客户端超时重试时服务器已不在），而不是靠着临时
+                // 端口把当前文件传完 —— 「停止服务」不再有幸存的幽灵传输。
+                let mut session_stop_rx = session_tx.subscribe();
                 tokio::spawn(async move {
                     let _session = session;
-                    if let Err(e) = handle_session(root, peer, first).await {
-                        warn!(%peer, "tftp session ended: {e}");
+                    tokio::select! {
+                        result = handle_session(root, peer, first) => {
+                            if let Err(e) = result {
+                                warn!(%peer, "tftp session ended: {e}");
+                            }
+                        }
+                        _ = session_stop_rx.recv() => {
+                            info!(%peer, "tftp session aborted: server stopping");
+                        }
                     }
                 });
             }

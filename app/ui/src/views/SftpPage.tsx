@@ -72,6 +72,7 @@ export default function SftpPage({ log, sftpStatus, refresh, onTransferChange, d
         log={log}
         onTransferChange={onTransferChange}
         defaultLocal={joinDefault(defaultBase, "sftp-root", "hello.txt")}
+        serverStatus={sftpStatus}
       />
     </div>
   );

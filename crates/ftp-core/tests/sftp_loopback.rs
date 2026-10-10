@@ -464,3 +464,28 @@ async fn sftp_download_rename_failure_emits_error_event() {
     client.disconnect().await.unwrap();
     handle.stop().await;
 }
+
+/// 停服必须关闭已建立的会话（2026-10-10 用户实测回归）：此前
+/// `spawn_ssh_session` 脱管运行，服务器停止后客户端仍能继续下载。修复后
+/// 会话任务订阅 stop 信号，`stop()` 一到即丢弃 TCP 流——镜像
+/// `ftp_server_lifecycle::stop_closes_active_sessions`。
+#[tokio::test]
+async fn sftp_stop_closes_active_sessions() {
+    let (handle, app_data, _root, _shutdown) = start_server("stop-sessions", false).await;
+    let client = SftpClient::connect(client_cfg(handle.port), &app_data, true)
+        .await
+        .expect("首连应能连上");
+    client.list("/").await.expect("停服前会话应可用");
+
+    handle.stop().await;
+    // 停服通过 russh 的 handle.disconnect 发 SSH_MSG_DISCONNECT 并关闭连接，
+    // 这是异步过程（stop() 只等 accept 循环退出），给一个短暂窗口让会话任务
+    // 走完断开流程；赶上末班车的最后一个在途请求仍可能被应答。
+    tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    assert!(
+        client.list("/").await.is_err(),
+        "服务器停止后，已建立的 SFTP 会话应当被关闭"
+    );
+    // 会话已死：客户端侧清理不应 panic，错误可忽略。
+    let _ = client.disconnect().await;
+}

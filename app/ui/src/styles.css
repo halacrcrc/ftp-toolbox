@@ -716,6 +716,11 @@ button {
   outline-offset: -2px;
 }
 
+.remote-tree-check {
+  flex: none;
+  margin-right: 2px;
+}
+
 .remote-tree-mark {
   font-family: Consolas, "Courier New", monospace;
   color: var(--text-3);

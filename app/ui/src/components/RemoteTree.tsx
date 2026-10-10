@@ -1,3 +1,4 @@
+import { useEffect, useState } from "react";
 import { crumbsRemote, isRoot, RemoteCrumb } from "../lib/remotepath";
 import { fmtBytes } from "../lib/format";
 
@@ -28,10 +29,14 @@ interface RemoteTreeProps {
   onUp(): void;
   /** 强制重拉当前目录。 */
   onRefresh(): void;
-  /** 点文件行触发下载（M1 仅占位，M2 接保存对话框）。 */
-  onDownload(entry: RemoteEntry): void;
   /** 可选：点「上传」按钮打开系统文件选择器（父组件接手后续上传流程）。 */
   onUpload?(): void;
+  /**
+   * 批量下载勾选的文件。文件行的点按 = 勾选/取消勾选，下载统一走头部
+   * 「下载（N）」按钮（N 为勾选数）；只允许勾文件——目录的批量下载要
+   * 递归拉取，另立需求。
+   */
+  onDownloadMany(entries: RemoteEntry[]): void;
 }
 
 /** 行首类型标记，与旧 `<pre>` 列表的 d/-/l 记法保持一致。 */
@@ -58,7 +63,8 @@ function sortEntries(entries: RemoteEntry[]): RemoteEntry[] {
 
 /**
  * 协议无关的远端文件树（受控组件，不感知 FTP/SFTP，也不 import 后端 API）：
- * 面包屑 + 上级/刷新 + 条目列表。目录行点按下钻，文件行点按触发 onDownload。
+ * 面包屑 + 工具按钮 + 条目列表。目录行点按下钻，文件行点按切换勾选，
+ * 下载统一走「下载（N）」。
  */
 export default function RemoteTree({
   entries,
@@ -69,11 +75,33 @@ export default function RemoteTree({
   onCrumb,
   onUp,
   onRefresh,
-  onDownload,
   onUpload,
+  onDownloadMany,
 }: RemoteTreeProps) {
   const crumbs: RemoteCrumb[] = crumbsRemote(currentPath);
   const atRoot = isRoot(currentPath);
+  // 批量下载的勾选集（存文件名；同一目录内名字唯一）。换目录即清空，
+  // 避免把上一个目录的同名文件误打进这次批量。
+  const [selected, setSelected] = useState<Set<string>>(new Set());
+  useEffect(() => setSelected(new Set()), [currentPath]);
+
+  const files = (entries ?? []).filter((e) => e.kind === "file");
+  const allPicked = files.length > 0 && files.every((e) => selected.has(e.name));
+  const pickAll = () =>
+    setSelected(allPicked ? new Set() : new Set(files.map((e) => e.name)));
+  const toggleOne = (name: string) =>
+    setSelected((prev) => {
+      const next = new Set(prev);
+      if (next.has(name)) next.delete(name);
+      else next.add(name);
+      return next;
+    });
+  const confirmDownload = () => {
+    // 下发前按当前列表过滤一遍：勾选后文件可能已被刷新掉。
+    const picked = files.filter((e) => selected.has(e.name));
+    setSelected(new Set());
+    onDownloadMany(picked);
+  };
 
   return (
     <div className="remote-tree">
@@ -121,12 +149,30 @@ export default function RemoteTree({
               上传
             </button>
           )}
+          {files.length > 0 && (
+            <button
+              type="button"
+              className="btn small"
+              disabled={disabled}
+              onClick={pickAll}
+            >
+              {allPicked ? "全不选" : "全选"}
+            </button>
+          )}
+          <button
+            type="button"
+            className="btn small"
+            disabled={disabled || selected.size === 0}
+            onClick={confirmDownload}
+          >
+            {selected.size > 0 ? `下载（${selected.size}）` : "下载"}
+          </button>
         </div>
       </div>
       <div className="remote-tree-body">
         {!disabled && (
           <div className="remote-tree-hint">
-            点「上传」选择文件、或把文件拖到此区域，即可上传到当前目录；点文件名下载。
+            点「上传」选择文件、或把文件拖到此区域即可上传到当前目录；点文件行勾选，「下载（N）」批量下载。
           </div>
         )}
         {loading ? (
@@ -145,17 +191,28 @@ export default function RemoteTree({
               onClick={() => {
                 if (disabled) return;
                 if (e.kind === "dir") onNavigate(e.name);
-                else if (e.kind === "file") onDownload(e);
+                else if (e.kind === "file") toggleOne(e.name);
               }}
               onKeyDown={(ev) => {
                 if (ev.key !== "Enter" && ev.key !== " ") return;
                 ev.preventDefault();
                 if (disabled) return;
                 if (e.kind === "dir") onNavigate(e.name);
-                else if (e.kind === "file") onDownload(e);
+                else if (e.kind === "file") toggleOne(e.name);
               }}
               title={e.name}
             >
+              {e.kind === "file" && (
+                <input
+                  type="checkbox"
+                  className="remote-tree-check"
+                  checked={selected.has(e.name)}
+                  // 拦掉冒泡：行本身点按也是切换勾选，不能让复选框的点击触发两次。
+                  onClick={(ev) => ev.stopPropagation()}
+                  onKeyDown={(ev) => ev.stopPropagation()}
+                  onChange={() => toggleOne(e.name)}
+                />
+              )}
               <span className="remote-tree-mark">{kindMark(e.kind)}</span>
               <span className="remote-tree-name">{e.name}</span>
               <span className="remote-tree-size">{e.size === undefined ? "—" : fmtBytes(e.size)}</span>

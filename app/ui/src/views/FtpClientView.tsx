@@ -1,7 +1,8 @@
 import { useEffect, useRef, useState } from "react";
-import { api, newTransferId, pathBase, pickOpenFiles, pickSaveFile, FtpEntry, ServerStatus } from "../api";
+import { api, newTransferId, pathBase, pickOpenDirectory, pickOpenFiles, FtpEntry, ServerStatus } from "../api";
 import { getCurrentWebview } from "@tauri-apps/api/webview";
 import RemoteTree, { RemoteEntry } from "../components/RemoteTree";
+import { joinDefault } from "./FtpPage";
 import { joinRemote, normalize, parentRemote } from "../lib/remotepath";
 import { LogEntry } from "../App";
 
@@ -140,29 +141,6 @@ export default function FtpClientView({
     }
   }, [serverStatus, connected, addr, log]);
 
-  /** 点树里的文件节点：弹「保存到…」对话框（预填文件名）后下载。 */
-  const downloadEntry = async (entry: RemoteEntry) => {
-    if (entry.kind === "dir") return;
-    const remotePath = joinRemote(currentPath, entry.name);
-    let localPath: string | null;
-    try {
-      localPath = await pickSaveFile(entry.name);
-    } catch (e) {
-      log(`打开保存对话框失败: ${e}`, "error");
-      return;
-    }
-    if (!localPath) return;
-    const transferId = newTransferId();
-    onTransferChange?.(transferId);
-    try {
-      log(await api.ftpDownload(remotePath, localPath, transferId), "ok");
-    } catch (e) {
-      log(`下载失败: ${e}`, "error");
-    } finally {
-      onTransferChange?.(null);
-    }
-  };
-
   /** 拖入文件的落点统一为当前目录；多文件串行上传（单连接模型，勿并发）。 */
   const uploadPaths = async (localPaths: string[]) => {
     if (!connected || localPaths.length === 0) return;
@@ -192,6 +170,40 @@ export default function FtpClientView({
       return;
     }
     if (files) await uploadPaths(files);
+  };
+
+  /**
+   * 批量下载（树里勾选多个文件）：先选一次目标目录，勾选的文件依次下到该
+   * 目录（保留原文件名），失败不中断后续文件。
+   */
+  const downloadMany = async (picked: RemoteEntry[]) => {
+    if (picked.length === 0) return;
+    let dir: string | null;
+    try {
+      dir = await pickOpenDirectory();
+    } catch (e) {
+      log(`打开目录选择器失败: ${e}`, "error");
+      return;
+    }
+    if (!dir) return;
+    for (const e of picked) {
+      const transferId = newTransferId();
+      onTransferChange?.(transferId);
+      try {
+        log(
+          await api.ftpDownload(
+            joinRemote(currentPath, e.name),
+            joinDefault(dir, e.name),
+            transferId
+          ),
+          "ok"
+        );
+      } catch (err) {
+        log(`下载失败: ${e.name}: ${err}`, "error");
+      } finally {
+        onTransferChange?.(null);
+      }
+    }
   };
 
   // Tauri v2 拦截了 HTML5 drop 事件（dragDropEnabled 默认开），拖拽上传只能走
@@ -320,8 +332,8 @@ export default function FtpClientView({
           onCrumb={(p) => void openDir(p, false)}
           onUp={() => void openDir(parentRemote(currentPath), true)}
           onRefresh={() => void openDir(currentPath, true)}
-          onDownload={(e) => void downloadEntry(e)}
           onUpload={() => void pickAndUpload()}
+          onDownloadMany={(picked) => void downloadMany(picked)}
         />
       </div>
     </div>

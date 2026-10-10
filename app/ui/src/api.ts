@@ -300,6 +300,12 @@ export async function pickOpenFiles(): Promise<string[] | null> {
   return Array.isArray(selected) ? selected : [selected];
 }
 
+/** Open the native Windows directory picker; null when cancelled. */
+export async function pickOpenDirectory(): Promise<string | null> {
+  const selected = await open({ directory: true });
+  return typeof selected === "string" ? selected : null;
+}
+
 /** Directory part of a Windows/POSIX path, with the trailing separator kept. */
 export function pathDir(p: string): string {
   const i = Math.max(p.lastIndexOf("\\"), p.lastIndexOf("/"));

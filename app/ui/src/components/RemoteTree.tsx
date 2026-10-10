@@ -21,6 +21,11 @@ interface RemoteTreeProps {
   loading: boolean;
   /** 未连接/断开中：禁用全部交互。 */
   disabled: boolean;
+  /**
+   * 批量传输进行中：只灰掉头部动作按钮（上传/上传文件夹/全选/下载），
+   * 浏览（下钻/面包屑/勾选）不受影响。防重入守卫在父组件的入口函数里。
+   */
+  actionsDisabled?: boolean;
   /** 点目录行 → 父组件去列该子目录。 */
   onNavigate(dirName: string): void;
   /** 面包屑点击 → 按完整路径跳转（根节点名 "/" 不是子目录名，须走路径）。 */
@@ -73,6 +78,7 @@ export default function RemoteTree({
   currentPath,
   loading,
   disabled,
+  actionsDisabled,
   onNavigate,
   onCrumb,
   onUp,
@@ -146,7 +152,7 @@ export default function RemoteTree({
             <button
               type="button"
               className="btn small"
-              disabled={disabled}
+              disabled={disabled || actionsDisabled}
               onClick={onUpload}
             >
               上传
@@ -156,7 +162,7 @@ export default function RemoteTree({
             <button
               type="button"
               className="btn small"
-              disabled={disabled}
+              disabled={disabled || actionsDisabled}
               onClick={onUploadFolder}
             >
               上传文件夹
@@ -166,7 +172,7 @@ export default function RemoteTree({
             <button
               type="button"
               className="btn small"
-              disabled={disabled}
+              disabled={disabled || actionsDisabled}
               onClick={pickAll}
             >
               {allPicked ? "全不选" : "全选"}
@@ -175,7 +181,7 @@ export default function RemoteTree({
           <button
             type="button"
             className="btn small"
-            disabled={disabled || selected.size === 0}
+            disabled={disabled || actionsDisabled || selected.size === 0}
             onClick={confirmDownload}
           >
             {selected.size > 0 ? `下载（${selected.size}）` : "下载"}

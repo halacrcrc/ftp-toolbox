@@ -48,6 +48,17 @@ export default function FtpClientView({
   // 自签服务器（包括本应用自己）需要勾「接受无效证书」。
   const [ftps, setFtps] = useState(false);
   const [acceptInvalidCerts, setAcceptInvalidCerts] = useState(false);
+  // 批量传输（上传/下载文件夹或多选）进行中：忽略新的批量触发。后端会话锁
+  // 虽保证不损坏连接，但两批交错会互相覆盖取消令牌、日志交错难读。
+  const [batchBusy, setBatchBusy] = useState(false);
+  // 与 state 同步的 ref：openDir 的守卫读它。批量收尾在 finally 里先清 ref
+  // 再刷新目录——state 更新是异步的，openDir 读渲染闭包里的 state 会把
+  // 自己的收尾刷新也挡掉。
+  const batchBusyRef = useRef(false);
+  const setBatch = (v: boolean) => {
+    batchBusyRef.current = v;
+    setBatchBusy(v);
+  };
 
   /** 断开/停服后清空树：缓存一并丢弃，重连后从根重新列出。 */
   const resetTree = () => {
@@ -71,6 +82,13 @@ export default function FtpClientView({
         setPathDraft(path);
         return;
       }
+    }
+    // 批量传输持有会话锁，LIST 会排队到传输结束（FTP 单控制连接跑不了
+    // 并发命令）——与其树卡「加载中」几分钟，不如保持当前内容继续浏览。
+    // 已列过的目录在上面缓存命中处即时切换，不受影响。
+    if (batchBusyRef.current) {
+      log("批量传输进行中，暂不能列出新目录，结束后可刷新");
+      return;
     }
     setTreeLoading(true);
     try {
@@ -183,42 +201,52 @@ export default function FtpClientView({
   };
 
   const uploadPaths = async (localPaths: string[]) => {
-    if (!connected || localPaths.length === 0) return;
-    for (const lp of localPaths) {
-      let isDir = false;
-      try {
-        isDir = await api.localIsDir(lp);
-      } catch (e) {
-        log(`上传失败: ${pathBase(lp)}: ${e}`, "error");
-        continue;
-      }
-      if (isDir) {
-        // 文件夹：远端镜像本地结构（去掉尾随分隔符再取末段当远端目录名）。
-        const name = pathBase(lp.replace(/[\\/]+$/, "")) || "文件夹";
-        try {
-          const [ok, failed] = await uploadFolderInto(lp, joinRemote(currentPath, name));
-          log(
-            `文件夹上传结束: ${name}（${ok} 个文件${failed > 0 ? `，${failed} 个失败` : ""}）`,
-            failed > 0 ? "error" : "ok"
-          );
-        } catch (e) {
-          log(`文件夹上传失败: ${name}: ${e}`, "error");
-        }
-      } else {
-        const remotePath = joinRemote(currentPath, pathBase(lp));
-        const transferId = newTransferId();
-        onTransferChange?.(transferId);
-        try {
-          log(await api.ftpUpload(lp, remotePath, transferId), "ok");
-        } catch (e) {
-          log(`上传失败: ${e}`, "error");
-        } finally {
-          onTransferChange?.(null);
-        }
-      }
+    if (batchBusy) {
+      log("已有批量传输进行中，本次上传已忽略");
+      return;
     }
-    // 全部结束后重拉当前目录，让新内容出现在树里
-    await openDir(currentPath, true);
+    if (!connected || localPaths.length === 0) return;
+    setBatch(true);
+    try {
+      for (const lp of localPaths) {
+        let isDir = false;
+        try {
+          isDir = await api.localIsDir(lp);
+        } catch (e) {
+          log(`上传失败: ${pathBase(lp)}: ${e}`, "error");
+          continue;
+        }
+        if (isDir) {
+          // 文件夹：远端镜像本地结构（去掉尾随分隔符再取末段当远端目录名）。
+          const name = pathBase(lp.replace(/[\\/]+$/, "")) || "文件夹";
+          try {
+            const [ok, failed] = await uploadFolderInto(lp, joinRemote(currentPath, name));
+            log(
+              `文件夹上传结束: ${name}（${ok} 个文件${failed > 0 ? `，${failed} 个失败` : ""}）`,
+              failed > 0 ? "error" : "ok"
+            );
+          } catch (e) {
+            log(`文件夹上传失败: ${name}: ${e}`, "error");
+          }
+        } else {
+          const remotePath = joinRemote(currentPath, pathBase(lp));
+          const transferId = newTransferId();
+          onTransferChange?.(transferId);
+          try {
+            log(await api.ftpUpload(lp, remotePath, transferId), "ok");
+          } catch (e) {
+            log(`上传失败: ${e}`, "error");
+          } finally {
+            onTransferChange?.(null);
+          }
+        }
+      }
+    } finally {
+      setBatch(false);
+      // 全部结束后重拉当前目录，让新内容出现在树里；先清 busy 再刷新，
+      // 否则 openDir 的传输守卫会把它挡掉。
+      await openDir(currentPath, true);
+    }
   };
 
   /** 「上传」按钮：打开系统文件选择器（可多选），选中的文件上传到当前目录。 */
@@ -251,6 +279,10 @@ export default function FtpClientView({
    * 并发），单个失败不中断，结尾汇总成功/失败数。
    */
   const downloadMany = async (picked: RemoteEntry[]) => {
+    if (batchBusy) {
+      log("已有批量传输进行中，本次下载已忽略");
+      return;
+    }
     if (picked.length === 0) return;
     let dir: string | null;
     try {
@@ -260,50 +292,55 @@ export default function FtpClientView({
       return;
     }
     if (!dir) return;
-    let okFiles = 0;
-    let failed = 0;
-    const runFile = async (remotePath: string, localPath: string) => {
-      const transferId = newTransferId();
-      onTransferChange?.(transferId);
-      try {
-        log(await api.ftpDownload(remotePath, localPath, transferId), "ok");
-        okFiles++;
-      } catch (err) {
-        failed++;
-        log(`下载失败: ${remotePath}: ${err}`, "error");
-      } finally {
-        onTransferChange?.(null);
-      }
-    };
-    const walk = async (entries: RemoteEntry[], remoteDir: string, localDir: string) => {
-      for (const e of entries) {
-        if (e.kind === "file") {
-          await runFile(joinRemote(remoteDir, e.name), joinDefault(localDir, pathSafeName(e.name)));
-        } else if (e.kind === "dir") {
-          const sub = joinDefault(localDir, pathSafeName(e.name));
-          try {
-            await api.createLocalDir(sub);
-          } catch (err) {
-            failed++;
-            log(`创建目录失败: ${sub}: ${err}`, "error");
-            continue;
-          }
-          try {
-            const kids = await api.ftpListDetailed(joinRemote(remoteDir, e.name));
-            await walk(kids.map(toRemoteEntry), joinRemote(remoteDir, e.name), sub);
-          } catch (err) {
-            failed++;
-            log(`列目录失败: ${joinRemote(remoteDir, e.name)}: ${err}`, "error");
-          }
-        } else {
-          // 链接/特殊条目不下载不递归：链接语义随服务器而异，还可能成环。
-          log(`跳过 ${e.name}（${e.kind === "symlink" ? "链接" : "类型未知"}）`);
+    setBatch(true);
+    try {
+      let okFiles = 0;
+      let failed = 0;
+      const runFile = async (remotePath: string, localPath: string) => {
+        const transferId = newTransferId();
+        onTransferChange?.(transferId);
+        try {
+          log(await api.ftpDownload(remotePath, localPath, transferId), "ok");
+          okFiles++;
+        } catch (err) {
+          failed++;
+          log(`下载失败: ${remotePath}: ${err}`, "error");
+        } finally {
+          onTransferChange?.(null);
         }
-      }
-    };
-    await walk(picked, currentPath, dir);
-    if (failed > 0) log(`批量下载结束：${okFiles} 个成功，${failed} 个失败`, "error");
-    else log(`批量下载结束：共 ${okFiles} 个文件`, "ok");
+      };
+      const walk = async (entries: RemoteEntry[], remoteDir: string, localDir: string) => {
+        for (const e of entries) {
+          if (e.kind === "file") {
+            await runFile(joinRemote(remoteDir, e.name), joinDefault(localDir, pathSafeName(e.name)));
+          } else if (e.kind === "dir") {
+            const sub = joinDefault(localDir, pathSafeName(e.name));
+            try {
+              await api.createLocalDir(sub);
+            } catch (err) {
+              failed++;
+              log(`创建目录失败: ${sub}: ${err}`, "error");
+              continue;
+            }
+            try {
+              const kids = await api.ftpListDetailed(joinRemote(remoteDir, e.name));
+              await walk(kids.map(toRemoteEntry), joinRemote(remoteDir, e.name), sub);
+            } catch (err) {
+              failed++;
+              log(`列目录失败: ${joinRemote(remoteDir, e.name)}: ${err}`, "error");
+            }
+          } else {
+            // 链接/特殊条目不下载不递归：链接语义随服务器而异，还可能成环。
+            log(`跳过 ${e.name}（${e.kind === "symlink" ? "链接" : "类型未知"}）`);
+          }
+        }
+      };
+      await walk(picked, currentPath, dir);
+      if (failed > 0) log(`批量下载结束：${okFiles} 个成功，${failed} 个失败`, "error");
+      else log(`批量下载结束：共 ${okFiles} 个文件`, "ok");
+    } finally {
+      setBatch(false);
+    }
   };
 
   // Tauri v2 拦截了 HTML5 drop 事件（dragDropEnabled 默认开），拖拽上传只能走
@@ -435,6 +472,7 @@ export default function FtpClientView({
           onUpload={() => void pickAndUpload()}
           onUploadFolder={() => void pickAndUploadFolder()}
           onDownloadMany={(picked) => void downloadMany(picked)}
+          actionsDisabled={batchBusy}
         />
       </div>
     </div>

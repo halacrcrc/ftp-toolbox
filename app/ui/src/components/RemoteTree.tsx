@@ -31,6 +31,8 @@ interface RemoteTreeProps {
   onRefresh(): void;
   /** 可选：点「上传」按钮打开系统文件选择器（父组件接手后续上传流程）。 */
   onUpload?(): void;
+  /** 可选：点「上传文件夹」按钮打开系统目录选择器，整个文件夹递归上传。 */
+  onUploadFolder?(): void;
   /**
    * 批量下载勾选的条目。文件行/文件夹行的点按 = 勾选/取消勾选（目录行的
    * 点按仍然是下钻，勾选走勾选框），下载统一走头部「下载（N）」按钮；
@@ -76,6 +78,7 @@ export default function RemoteTree({
   onUp,
   onRefresh,
   onUpload,
+  onUploadFolder,
   onDownloadMany,
 }: RemoteTreeProps) {
   const crumbs: RemoteCrumb[] = crumbsRemote(currentPath);
@@ -149,6 +152,16 @@ export default function RemoteTree({
               上传
             </button>
           )}
+          {onUploadFolder && (
+            <button
+              type="button"
+              className="btn small"
+              disabled={disabled}
+              onClick={onUploadFolder}
+            >
+              上传文件夹
+            </button>
+          )}
           {checkable.length > 0 && (
             <button
               type="button"
@@ -172,7 +185,7 @@ export default function RemoteTree({
       <div className="remote-tree-body">
         {!disabled && (
           <div className="remote-tree-hint">
-            点「上传」选择文件、或把文件拖到此区域即可上传到当前目录；点行勾选（文件夹也可勾），「下载（N）」批量下载。
+            点「上传」选文件、「上传文件夹」选目录、或把文件/文件夹拖到此区域即可上传到当前目录；点行勾选（文件夹也可勾），「下载（N）」批量下载。
           </div>
         )}
         {loading ? (

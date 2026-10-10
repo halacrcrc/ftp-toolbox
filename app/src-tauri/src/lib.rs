@@ -99,6 +99,69 @@ async fn create_local_dir(path: String) -> CmdResult<String> {
     Ok(format!("已创建目录 {path}"))
 }
 
+/// 判断本地路径是否是目录（拖拽上传分流：文件夹走递归，文件直接传）。
+#[tauri::command]
+async fn local_is_dir(path: String) -> CmdResult<bool> {
+    Ok(tokio::fs::metadata(&path).await.map_err(err)?.is_dir())
+}
+
+/// `local_walk` 的返回：相对根路径的目录/文件清单。
+#[derive(serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+struct LocalWalk {
+    /// 目录（父先序：父目录总排在子目录前面），POSIX 分隔符。
+    dirs: Vec<String>,
+    /// 文件，POSIX 分隔符。
+    files: Vec<String>,
+    /// 跳过的符号链接（可能成环，与下载侧的跳过策略对称）。
+    skipped: Vec<String>,
+}
+
+/// 递归遍历本地目录（文件夹上传用）：DFS 保证父目录先于子目录出现，
+/// 相对路径统一用 `/` 分隔，前端 joinRemote 能直接拼成远端路径。
+#[tauri::command]
+async fn local_walk(path: String) -> CmdResult<LocalWalk> {
+    let mut out = LocalWalk {
+        dirs: Vec::new(),
+        files: Vec::new(),
+        skipped: Vec::new(),
+    };
+    walk_rec(
+        std::path::Path::new(&path),
+        std::path::Path::new(&path),
+        &mut out,
+    )
+    .await?;
+    Ok(out)
+}
+
+/// 异步递归需要 `Box::pin`（E0733）：目录树的深度编译期未知。
+async fn walk_rec(
+    root: &std::path::Path,
+    dir: &std::path::Path,
+    out: &mut LocalWalk,
+) -> CmdResult<()> {
+    let mut rd = tokio::fs::read_dir(dir).await.map_err(err)?;
+    while let Some(entry) = rd.next_entry().await.map_err(err)? {
+        let p = entry.path();
+        let rel = p
+            .strip_prefix(root)
+            .map_err(err)?
+            .to_string_lossy()
+            .replace('\\', "/");
+        let ft = entry.file_type().await.map_err(err)?;
+        if ft.is_symlink() {
+            out.skipped.push(rel);
+        } else if ft.is_dir() {
+            out.dirs.push(rel);
+            Box::pin(walk_rec(root, &p, out)).await?;
+        } else {
+            out.files.push(rel);
+        }
+    }
+    Ok(())
+}
+
 // ---------- FTP server ----------
 
 /// Where the FTPS certificate pair lives: `<app-data>/certs/{cert,key}.pem`.
@@ -767,6 +830,17 @@ async fn ftp_download(
     result
 }
 
+/// 在远端创建一级目录（FTP MKD；父目录必须已存在，多级结构由前端按父先序
+/// 逐级建。已存在会报错，由前端按「不阻断继续传文件」处理——重传到既有
+/// 结构是常见场景）。
+#[tauri::command]
+async fn ftp_mkdir(state: State<'_, AppState>, path: String) -> CmdResult<String> {
+    let mut guard = state.ftp_client.lock().await;
+    let client = guard.as_mut().ok_or("未连接 FTP 服务器")?;
+    client.mkdir(&path).await.map_err(err)?;
+    Ok(format!("已创建目录 {path}"))
+}
+
 // ---------- TFTP client ----------
 
 #[tauri::command]
@@ -1123,6 +1197,16 @@ async fn sftp_client_list(
     client.list(path.as_deref().unwrap_or("/")).await.map_err(err)
 }
 
+/// 在远端创建一级目录（文件夹上传用；父先序逐级建，已存在会报错，
+/// 由前端按「不阻断继续传文件」处理——重传到既有结构是常见场景）。
+#[tauri::command]
+async fn sftp_client_mkdir(state: State<'_, AppState>, path: String) -> CmdResult<String> {
+    let guard = state.sftp_client.lock().await;
+    let client = guard.as_ref().ok_or("未连接 SFTP 服务器")?;
+    client.mkdir(&path).await.map_err(err)?;
+    Ok(format!("已创建目录 {path}"))
+}
+
 #[tauri::command]
 async fn sftp_client_upload(
     app: AppHandle,
@@ -1455,6 +1539,9 @@ pub fn run() {
             ftp_list,
             ftp_list_detailed,
             create_local_dir,
+            local_is_dir,
+            local_walk,
+            ftp_mkdir,
             ftp_upload,
             ftp_download,
             tftp_upload,
@@ -1467,6 +1554,7 @@ pub fn run() {
             sftp_client_connect,
             sftp_client_disconnect,
             sftp_client_list,
+            sftp_client_mkdir,
             sftp_client_upload,
             sftp_client_download,
             sftp_client_update_known_host,

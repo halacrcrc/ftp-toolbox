@@ -49,6 +49,15 @@ async fn ftp_list_detailed_returns_structured_entries() {
         .unwrap_or_else(|| panic!("应列出子目录 subdir: {entries:?}"));
     assert_eq!(dir.kind, "dir", "子目录不应被报成文件");
 
+    // MKD（文件夹上传的建目录命令）：建完应能在结构化列表里看到。
+    client.mkdir("/made-by-mkd").await.unwrap();
+    let after = client.list_detailed(Some("/")).await.unwrap();
+    let made = after
+        .iter()
+        .find(|e| e.name == "made-by-mkd")
+        .unwrap_or_else(|| panic!("MKD 建的目录应出现在列表里: {after:?}"));
+    assert_eq!(made.kind, "dir");
+
     client.quit().await.unwrap();
     handle.stop().await;
 }

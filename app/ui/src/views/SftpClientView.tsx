@@ -188,22 +188,87 @@ export default function SftpClientView({
     }
   }, [serverStatus, connected, port, log]);
 
-  /** 拖入文件的落点统一为当前目录；多文件串行上传（单连接模型，勿并发）。 */
-  const uploadPaths = async (localPaths: string[]) => {
-    if (!connected || localPaths.length === 0) return;
-    for (const lp of localPaths) {
-      const remotePath = joinRemote(currentPath, pathBase(lp));
+  /**
+   * 递归上传一个本地文件夹：远端按父先序逐级建目录后逐文件上传（串行），
+   * 返回 [成功文件数, 失败文件数]。mkdir 对已存在目录会报错——重传到既有
+   * 结构是常见场景，按提示日志处理、不阻断不计失败，文件错误才是真信号。
+   */
+  const uploadFolderInto = async (
+    localRoot: string,
+    remoteBase: string
+  ): Promise<[number, number]> => {
+    let ok = 0;
+    let failed = 0;
+    const w = await api.localWalk(localRoot);
+    for (const s of w.skipped) log(`跳过链接 ${s}（可能成环，不参与上传）`);
+    const mk = async (p: string) => {
+      try {
+        await api.sftpClientMkdir(p);
+      } catch {
+        log(`目录已存在或创建失败，继续: ${p}`);
+      }
+    };
+    await mk(remoteBase);
+    for (const d of w.dirs) await mk(joinRemote(remoteBase, d));
+    for (const f of w.files) {
       const transferId = newTransferId();
       onTransferChange?.(transferId);
       try {
-        log(await api.sftpClientUpload(lp, remotePath, transferId), "ok");
+        log(
+          await api.sftpClientUpload(
+            joinDefault(localRoot, f),
+            joinRemote(remoteBase, f),
+            transferId
+          ),
+          "ok"
+        );
+        ok++;
       } catch (e) {
-        log(`上传失败: ${e}`, "error");
+        failed++;
+        log(`上传失败: ${f}: ${e}`, "error");
       } finally {
         onTransferChange?.(null);
       }
     }
-    // 全部结束后重拉当前目录，让新文件出现在树里
+    return [ok, failed];
+  };
+
+  const uploadPaths = async (localPaths: string[]) => {
+    if (!connected || localPaths.length === 0) return;
+    for (const lp of localPaths) {
+      let isDir = false;
+      try {
+        isDir = await api.localIsDir(lp);
+      } catch (e) {
+        log(`上传失败: ${pathBase(lp)}: ${e}`, "error");
+        continue;
+      }
+      if (isDir) {
+        // 文件夹：远端镜像本地结构（去掉尾随分隔符再取末段当远端目录名）。
+        const name = pathBase(lp.replace(/[\\/]+$/, "")) || "文件夹";
+        try {
+          const [ok, failed] = await uploadFolderInto(lp, joinRemote(currentPath, name));
+          log(
+            `文件夹上传结束: ${name}（${ok} 个文件${failed > 0 ? `，${failed} 个失败` : ""}）`,
+            failed > 0 ? "error" : "ok"
+          );
+        } catch (e) {
+          log(`文件夹上传失败: ${name}: ${e}`, "error");
+        }
+      } else {
+        const remotePath = joinRemote(currentPath, pathBase(lp));
+        const transferId = newTransferId();
+        onTransferChange?.(transferId);
+        try {
+          log(await api.sftpClientUpload(lp, remotePath, transferId), "ok");
+        } catch (e) {
+          log(`上传失败: ${e}`, "error");
+        } finally {
+          onTransferChange?.(null);
+        }
+      }
+    }
+    // 全部结束后重拉当前目录，让新内容出现在树里
     await openDir(currentPath, true);
   };
 
@@ -217,6 +282,18 @@ export default function SftpClientView({
       return;
     }
     if (files) await uploadPaths(files);
+  };
+
+  /** 「传文件夹」按钮：打开系统目录选择器，整个文件夹递归上传到当前目录。 */
+  const pickAndUploadFolder = async () => {
+    let dir: string | null;
+    try {
+      dir = await pickOpenDirectory();
+    } catch (e) {
+      log(`打开目录选择器失败: ${e}`, "error");
+      return;
+    }
+    if (dir) await uploadPaths([dir]);
   };
 
   /**
@@ -415,6 +492,7 @@ export default function SftpClientView({
           onUp={() => void openDir(parentRemote(currentPath), true)}
           onRefresh={() => void openDir(currentPath, true)}
           onUpload={() => void pickAndUpload()}
+          onUploadFolder={() => void pickAndUploadFolder()}
           onDownloadMany={(picked) => void downloadMany(picked)}
         />
       </div>

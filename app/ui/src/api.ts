@@ -144,6 +144,15 @@ export interface FtpEntry {
   mtime: number | null;
 }
 
+/** local_walk 的返回：本地文件夹递归清单（文件夹上传用），相对路径用 POSIX 分隔符。 */
+export interface LocalWalk {
+  /** 目录（父先序：父目录总排在子目录前面）。 */
+  dirs: string[];
+  files: string[];
+  /** 跳过的符号链接（可能成环，与下载侧策略对称）。 */
+  skipped: string[];
+}
+
 /** Backend tracing event forwarded over "backend-log". */
 export interface BackendLog {
   level: "TRACE" | "DEBUG" | "INFO" | "WARN" | "ERROR";
@@ -216,6 +225,12 @@ export const api = {
     invoke<string>("ftp_download", { remote, local, transferId: transferId ?? null }),
   /** 递归创建本地目录（批量下载时按远端结构建子目录）。 */
   createLocalDir: (path: string) => invoke<string>("create_local_dir", { path }),
+  /** 本地路径是否是目录（拖拽上传分流：文件夹递归，文件直接传）。 */
+  localIsDir: (path: string) => invoke<boolean>("local_is_dir", { path }),
+  /** 递归遍历本地文件夹（文件夹上传用）。 */
+  localWalk: (path: string) => invoke<LocalWalk>("local_walk", { path }),
+  /** 远端创建一级目录（父目录须已存在；已存在会报错，前端不阻断）。 */
+  ftpMkdir: (path: string) => invoke<string>("ftp_mkdir", { path }),
 
   tftpUpload: (server: string, local: string, remote: string, transferId?: string) =>
     invoke<string>("tftp_upload", { server, local, remote, transferId: transferId ?? null }),
@@ -254,6 +269,8 @@ export const api = {
   sftpClientDisconnect: () => invoke<string>("sftp_client_disconnect"),
   sftpClientList: (path?: string) =>
     invoke<SftpEntry[]>("sftp_client_list", { path: path ?? null }),
+  /** 远端创建一级目录（父目录须已存在；已存在会报错，前端不阻断）。 */
+  sftpClientMkdir: (path: string) => invoke<string>("sftp_client_mkdir", { path }),
   sftpClientUpload: (localPath: string, remotePath: string, transferId?: string) =>
     invoke<string>("sftp_client_upload", { localPath, remotePath, transferId: transferId ?? null }),
   sftpClientDownload: (remotePath: string, localPath: string, transferId?: string) =>

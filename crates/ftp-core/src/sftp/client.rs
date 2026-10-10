@@ -348,6 +348,12 @@ impl SftpClient {
         Ok(out)
     }
 
+    /// Create one remote directory (SFTP MKDIR；父目录必须已存在，
+    /// 多级结构由调用方按父先序逐级创建，见 ftp_mkdir/sftp_client_mkdir 命令)。
+    pub async fn mkdir(&self, path: &str) -> Result<()> {
+        self.sftp.create_dir(path).await.map_err(sftp_core_err)
+    }
+
     /// Upload a local file to a remote path, chunked, with progress events
     /// (file id = remote path; mirrors [`crate::ftp::client::FtpClient`]).
     /// `cancel` aborts between chunks; each chunk operation is bounded by the

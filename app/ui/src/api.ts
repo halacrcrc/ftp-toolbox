@@ -343,6 +343,9 @@ export function pathBase(p: string): string {
  * 拼接本地路径前不处理，恶意/异常服务器就能借文件名逃出用户选的目标目录。
  */
 export function pathSafeName(name: string): string {
+  // "." 与 ".." 不是合法文件名，会被路径解析吃掉——畸形服务器返回这种名字时
+  // 防止批量下载写出目标目录之外（评审 #32）。
+  if (name === "." || name === "..") return "_";
   return name.replace(/[\\/]/g, "_");
 }
 

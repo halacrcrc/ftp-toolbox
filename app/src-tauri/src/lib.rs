@@ -854,6 +854,9 @@ async fn tftp_upload(
 ) -> CmdResult<String> {
     let tx = progress_forwarder(&app);
     let token = transfer_id.as_deref().map(|id| state.cancels.register(id));
+    // 完成日志与 FTP/SFTP 客户端同口径：大小/用时/平均速度（评审 #33）。
+    // 大小读本地文件——上传是源文件，下载是刚落盘的目标文件，同一 local。
+    let started = std::time::Instant::now();
     let result = ftp_core::tftp::put(
         &server,
         std::path::Path::new(&local),
@@ -862,7 +865,13 @@ async fn tftp_upload(
         token,
     )
     .await
-    .map(|_| format!("上传完成: {remote}"))
+    .map(|_| {
+        let size = std::fs::metadata(&local).map(|m| m.len()).unwrap_or(0);
+        format!(
+            "上传完成: {remote}（{}）",
+            transfer_stats(size, started.elapsed())
+        )
+    })
     .map_err(err);
     if let Some(id) = transfer_id.as_deref() {
         state.cancels.unregister(id);
@@ -881,6 +890,7 @@ async fn tftp_download(
 ) -> CmdResult<String> {
     let tx = progress_forwarder(&app);
     let token = transfer_id.as_deref().map(|id| state.cancels.register(id));
+    let started = std::time::Instant::now();
     let result = ftp_core::tftp::get(
         &server,
         &remote,
@@ -889,7 +899,13 @@ async fn tftp_download(
         token,
     )
     .await
-    .map(|_| format!("下载完成: {remote}"))
+    .map(|_| {
+        let size = std::fs::metadata(&local).map(|m| m.len()).unwrap_or(0);
+        format!(
+            "下载完成: {remote}（{}）",
+            transfer_stats(size, started.elapsed())
+        )
+    })
     .map_err(err);
     if let Some(id) = transfer_id.as_deref() {
         state.cancels.unregister(id);

@@ -14,8 +14,9 @@
 
 Windows 安装包见 [Releases](https://github.com/halacrcrc/ftp-toolbox/releases/latest)：
 
-- `ftp-toolbox_0.5.0_x64-setup.exe` — NSIS 安装程序，向导式安装（推荐）
-- `ftp-toolbox_0.5.0_x64_en-US.msi` — MSI 安装包，适合批量部署
+- `ftp-toolbox_<版本>_x64-setup.exe` — NSIS 安装程序，向导式安装（推荐）
+- `ftp-toolbox_<版本>_x64-setup-offline.exe` — 同上，内嵌 WebView2 引导器，离线机器可用
+- `ftp-toolbox_<版本>_x64_en-US.msi` — MSI 安装包，适合批量部署
 
 依赖系统自带 WebView2（Win10/11 通常已预装）。安装包未做代码签名，首次运行 SmartScreen 会提示「未知发布者」，点「仍要运行」即可。
 
@@ -27,13 +28,16 @@ Windows 安装包见 [Releases](https://github.com/halacrcrc/ftp-toolbox/release
 
 - **FTP 服务器**：匿名 / 账号密码认证，被动端口 50000-50099，会话级日志（基于 libunftp）
 - **FTPS**：显式 TLS（`AUTH TLS`），自动生成并复用自签证书，可强制加密登录与数据通道，证书指纹可查看 / 重新生成
-- **FTP 客户端**：连接 / 列目录 / 上传 / 下载，全程进度反馈
+- **FTP 客户端**：连接 / 远端文件树浏览 / 批量上传下载，全程进度反馈（支持 FTPS 显式 TLS 连接）
 - **SFTP 服务器**（v0.3.0 起）：基于 russh 的 SSH 传输 + SFTP v3 协议
   - 密码 或 OpenSSH 公钥（authorized_keys）认证，任一通过即放行
   - 只读模式（连 `CREATE` / `TRUNCATE` 走私一并拦下）、共享目录约束
   - ed25519 主机密钥首次启动自动生成，指纹可核对 / 重新生成
-- **SFTP 客户端**：连接 / 列目录 / 上传 / 下载
+- **SFTP 客户端**：连接 / 远端文件树浏览 / 批量上传下载
   - **TOFU 主机密钥校验**：首连需确认指纹并记入 known_hosts；指纹变更一律硬拒绝，只能显式更新
+- **远端文件树**（FTP / SFTP 客户端，v0.6.0 起）：目录下钻 / 面包屑 / 路径跳转；勾选多选
+  批量下载（保留远端目录结构）；上传走系统文件选择器或直接拖入文件 / 文件夹，
+  文件夹递归上传 / 下载，失败项汇总统计
 - **TFTP 服务器 / 客户端**（自实现 RFC 1350）：
   - RFC 2348 `blksize` 协商（请求 8192，单文件上限 ~536 MB，兼容端自动回退 512 字节经典模式）
   - RFC 2349 `tsize` 协商（下载前获知文件大小，进度条显示真实百分比；上传时声明大小，超限服务端直接拒绝）
@@ -146,14 +150,13 @@ npm run typecheck        # tsc --noEmit
 
 - [x] FTP over TLS（FTPS）— v0.2.5 落地
 - [x] TFTP `tsize` 协商（下载前获知文件大小，进度条可显示百分比）— v0.3.3 落地
-- [ ] FTP 远端文件树浏览（拖拽上传/下载）
+- [x] FTP / SFTP 远端文件树（拖拽上传、勾选批量下载、文件夹递归传输）— v0.6.0 落地
 - [ ] SFTP 客户端公钥认证（属规格变更，需先定私钥来源）
 
 ## License
 
 本项目采用 **MIT 或 Apache-2.0 双许可**，使用者可任选其一（SPDX：`MIT OR Apache-2.0`）。
-与 Rust 生态主流项目（rust-lang、serde、tokio 等）保持一致 —— 相比单一 MIT，
-Apache-2.0 额外提供**明确的专利授权**，对法务敏感的公司用户更友好。
+两者均为宽松许可，可自由使用、修改与分发；需要明确专利授权条款的场景可选 Apache-2.0。
 
 - [LICENSE-MIT](LICENSE-MIT)
 - [LICENSE-APACHE](LICENSE-APACHE)

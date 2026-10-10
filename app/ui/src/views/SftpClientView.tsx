@@ -1,6 +1,7 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { api, newTransferId, pathBase, HostKeyStatus, KnownHostRecord, SftpEntry, SftpServerStatus } from "../api";
-import { fmtBytes } from "../lib/format";
+import RemoteTree, { RemoteEntry } from "../components/RemoteTree";
+import { joinRemote, parentRemote } from "../lib/remotepath";
 import LocalFileField from "../components/LocalFileField";
 import { LogEntry } from "../App";
 
@@ -16,19 +17,20 @@ interface HostKeyPrompt {
 }
 
 /**
- * SftpEntry → 列表行。与 FTP 客户端的 LIST 原始行不同，SFTP 拿到的是结构化
- * 条目，这里拼成同风格的短行。
- *
- * `fileType` 的契约已落地为 `"file" | "dir" | "symlink" | "other"`
- * （`crates/ftp-core/src/sftp/client.rs::SftpEntry`）。这里刻意保留前缀/子串
- * 的宽容匹配（而不是枚举硬比对），是为了后端将来扩展取值时不至于把未知类型
- * 渲染错 —— 未匹配上的一律按普通文件 `-` 显示。
+ * SftpEntry → RemoteEntry（协议无关树条目）。`fileType` 沿用列表渲染时代的
+ * 宽容匹配（后端契约已定为 "file"|"dir"|"symlink"|"other"，但保留前缀/子串
+ * 判断可兜住未来取值扩展），未识别的一律按 "other" 显示。
  */
-function formatEntry(e: SftpEntry): string {
+function toRemoteEntry(e: SftpEntry): RemoteEntry {
   const t = e.fileType.toLowerCase();
-  const mark = t.startsWith("d") ? "d" : t.startsWith("l") || t.includes("link") ? "l" : "-";
-  const time = e.mtime ? ` ${new Date(e.mtime * 1000).toLocaleString()}` : "";
-  return `${mark} ${e.name}（${fmtBytes(e.size)}）${time}`;
+  const kind: RemoteEntry["kind"] = t.startsWith("d")
+    ? "dir"
+    : t.startsWith("l") || t.includes("link")
+      ? "symlink"
+      : t.startsWith("f") || t.startsWith("-")
+        ? "file"
+        : "other";
+  return { name: e.name, kind, size: e.size, mtime: e.mtime ?? undefined };
 }
 
 export default function SftpClientView({
@@ -51,8 +53,11 @@ export default function SftpClientView({
   const [pass, setPass] = useState("");
   const [connected, setConnected] = useState(false);
   const [busy, setBusy] = useState(false);
-  const [remotePath, setRemotePath] = useState("");
-  const [listing, setListing] = useState<SftpEntry[] | null>(null);
+  // 远端文件树状态：当前目录 + 该目录条目 + 按路径缓存（返回上一级免重拉）
+  const [currentPath, setCurrentPath] = useState("");
+  const [entries, setEntries] = useState<RemoteEntry[] | null>(null);
+  const [treeLoading, setTreeLoading] = useState(false);
+  const treeCache = useRef(new Map<string, RemoteEntry[]>());
   const [local, setLocal] = useState(defaultLocal);
   const [remote, setRemote] = useState("hello.txt");
   const [prompt, setPrompt] = useState<HostKeyPrompt | null>(null);
@@ -63,6 +68,42 @@ export default function SftpClientView({
 
   const portNum = () => Number(port) || 22;
 
+  /** 断开/停服后清空树：缓存一并丢弃，重连后从根重新列出。 */
+  const resetTree = () => {
+    treeCache.current = new Map();
+    setEntries(null);
+    setCurrentPath("");
+  };
+
+  /**
+   * 打开远端目录并切换树视图。非 force 时命中缓存直接切换（面包屑/返回上一级
+   * 免重拉）；force 用于刷新与连上后的首次加载。空路径 = 服务器默认目录
+   * （后端 list(None) 落到 "/"）。
+   */
+  const openDir = async (path: string, force: boolean) => {
+    if (!force) {
+      const hit = treeCache.current.get(path);
+      if (hit) {
+        setCurrentPath(path);
+        setEntries(hit);
+        return;
+      }
+    }
+    setTreeLoading(true);
+    try {
+      const items = await api.sftpClientList(path || undefined);
+      const mapped = items.map(toRemoteEntry);
+      treeCache.current.set(path, mapped);
+      setEntries(mapped);
+      setCurrentPath(path);
+      log(`列出 ${items.length} 个条目`);
+    } catch (e) {
+      log(`列目录失败: ${e}`, "error");
+    } finally {
+      setTreeLoading(false);
+    }
+  };
+
   /** 真正发起连接；trustNewHost 仅在用户确认过 unknown 指纹后为 true。 */
   const doConnect = async (trustNewHost: boolean) => {
     setBusy(true);
@@ -70,6 +111,8 @@ export default function SftpClientView({
       const msg = await api.sftpClientConnect(host, portNum(), user, pass, trustNewHost);
       log(msg, "ok");
       setConnected(true);
+      // 连上即列根目录，树可直接下钻（失败时 openDir 内部已记日志）
+      await openDir("", true);
     } catch (e) {
       log(`连接失败: ${e}`, "error");
     } finally {
@@ -127,7 +170,7 @@ export default function SftpClientView({
       log(`断开失败: ${e}`, "error");
     } finally {
       setConnected(false);
-      setListing(null);
+      resetTree();
       setBusy(false);
     }
   };
@@ -144,21 +187,10 @@ export default function SftpClientView({
     const ourPort = serverStatus.localAddr.split(":").pop();
     if (ourPort && ourPort === port.trim()) {
       setConnected(false);
-      setListing(null);
-      setRemotePath("");
+      resetTree();
       log(`本机服务器已停止（${serverStatus.localAddr}），连接已断开`, "error");
     }
   }, [serverStatus, connected, port, log]);
-
-  const refresh = async () => {
-    try {
-      const items = await api.sftpClientList(remotePath || undefined);
-      setListing(items);
-      log(`列出 ${items.length} 个条目`);
-    } catch (e) {
-      log(`列目录失败: ${e}`, "error");
-    }
-  };
 
   const transfer = async (kind: "upload" | "download") => {
     const transferId = newTransferId();
@@ -274,24 +306,18 @@ export default function SftpClientView({
       <div className="card">
         <div className="card-head">
           <div className="card-title">远程目录</div>
-          <button className="btn small" onClick={refresh} disabled={!connected}>
-            刷新列表
-          </button>
         </div>
-        <label className="field">
-          <span>路径（留空为当前目录）</span>
-          <input
-            value={remotePath}
-            onChange={(e) => setRemotePath(e.target.value)}
-            disabled={!connected}
-            placeholder="/"
-          />
-        </label>
-        {listing !== null && (
-          <pre className="listing">
-            {listing.length ? listing.map(formatEntry).join("\n") : "（空目录）"}
-          </pre>
-        )}
+        <RemoteTree
+          entries={entries}
+          currentPath={currentPath}
+          loading={treeLoading}
+          disabled={!connected}
+          onNavigate={(d) => void openDir(joinRemote(currentPath, d), false)}
+          onCrumb={(p) => void openDir(p, false)}
+          onUp={() => void openDir(parentRemote(currentPath), true)}
+          onRefresh={() => void openDir(currentPath, true)}
+          onDownload={(e) => log(`选中 ${e.name}，下载即将支持`)}
+        />
       </div>
 
       <div className="card">
